@@ -13,10 +13,11 @@ from dotenv import load_dotenv
 # -------------------------------------------------
 # Setup
 # -------------------------------------------------
-load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = os.getenv("GUILD_ID")
-DB_PATH = Path("bot.db")
+# Use /data if it exists (Railway volume), otherwise use local
+_data_dir = Path("/data") if Path("/data").exists() else Path(".")
+DB_PATH = _data_dir / "bot.db"
 
 
 
@@ -674,6 +675,6 @@ async def themes(interaction: discord.Interaction):
 
 
 if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN is missing from .env")
+    raise RuntimeError("DISCORD_TOKEN environment variable is not set")
 
 bot.run(TOKEN)
