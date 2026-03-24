@@ -588,7 +588,7 @@ async def welcome_setup(
     banner_url: str | None = None,
 ):
     guild = guild_only(interaction)
-    kwargs = dict(welcome_channel_id=welcome_channel.id, welcome_text=welcome_text, welcome_theme=color)
+    kwargs = dict(welcome_channel_id=welcome_channel.id, welcome_text=welcome_text.replace("\\n", "\n"), welcome_theme=color)
     if banner_url:
         kwargs["welcome_banner_url"] = banner_url
     upsert_settings(guild.id, **kwargs)
@@ -623,7 +623,7 @@ async def welcome_edit(
         return
     kwargs = {}
     if welcome_text:
-        kwargs["welcome_text"] = welcome_text
+        kwargs["welcome_text"] = welcome_text.replace("\\n", "\n")
     if color:
         kwargs["welcome_theme"] = color
     if banner_url:
