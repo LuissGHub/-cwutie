@@ -18,7 +18,7 @@ GUILD_ID = os.getenv("GUILD_ID")
 # Use /data if it exists (Railway volume), otherwise use local
 _data_dir = Path("/data") if Path("/data").exists() else Path(".")
 DB_PATH = _data_dir / "bot.db"
-
+print("DB PATH:", DB_PATH)
 
 
 intents = discord.Intents.default()
