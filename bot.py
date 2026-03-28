@@ -89,6 +89,11 @@ def init_db() -> None:
     """
 )
     
+        try:
+        cur.execute("ALTER TABLE sticky_messages ADD COLUMN last_message_id INTEGER")
+    except sqlite3.OperationalError:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -418,7 +423,7 @@ async def on_message(message: discord.Message):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT message FROM sticky_messages WHERE guild_id = ? AND channel_id = ?",
+        "SELECT message, last_message_id FROM sticky_messages WHERE guild_id = ? AND channel_id = ?",
         (message.guild.id, message.channel.id),
     )
     row = cur.fetchone()
@@ -427,8 +432,25 @@ async def on_message(message: discord.Message):
     if not row:
         return
 
+    if row["last_message_id"]:
+        try:
+            old_msg = await message.channel.fetch_message(row["last_message_id"])
+            await old_msg.delete()
+        except:
+            pass
+
     embed = build_embed(title=None, description=row["message"], theme="pink")
-    await message.channel.send(embed=embed)
+    new_msg = await message.channel.send(embed=embed)
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE sticky_messages SET last_message_id = ? WHERE guild_id = ? AND channel_id = ?",
+        (new_msg.id, message.guild.id, message.channel.id),
+    )
+    conn.commit()
+    conn.close()
+
     
 # -------------------------------------------------
 # Commands — Embed
