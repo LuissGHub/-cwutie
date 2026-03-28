@@ -89,7 +89,7 @@ def init_db() -> None:
     """
 )
     
-        try:
+try:
         cur.execute("ALTER TABLE sticky_messages ADD COLUMN last_message_id INTEGER")
     except sqlite3.OperationalError:
         pass
