@@ -480,7 +480,11 @@ async def on_message(message: discord.Message):
         except Exception:
             pass
 
-    embed = build_embed(title=None, description=row["message"], theme="pink")
+    embed = build_embed(
+    title=None,
+    description=row["message"].replace("\\n", "\n"),
+    theme="pink"
+)
     new_msg = await message.channel.send(embed=embed)
 
     conn = get_db()
@@ -827,7 +831,11 @@ async def sticky_view(interaction: discord.Interaction):
     if not row:
         await interaction.response.send_message("No sticky message set for this channel.", ephemeral=True)
         return
-    embed = build_embed(title=None, description=row["message"], theme="pink")
+    embed = build_embed(
+    title=None,
+    description=row["message"].replace("\\n", "\n"),
+    theme="pink"
+)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
