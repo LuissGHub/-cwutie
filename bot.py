@@ -409,7 +409,27 @@ async def on_member_join(member: discord.Member):
     )
     await channel.send(embed=embed)
 
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+    await bot.process_commands(message)
 
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT message FROM sticky_messages WHERE guild_id = ? AND channel_id = ?",
+        (message.guild.id, message.channel.id),
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        return
+
+    embed = build_embed(title=None, description=row["message"], theme="pink")
+    await message.channel.send(embed=embed)
+    
 # -------------------------------------------------
 # Commands — Embed
 # -------------------------------------------------
