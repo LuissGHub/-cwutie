@@ -42,7 +42,7 @@ def init_db() -> None:
     conn = get_db()
 cur = conn.cursor()
 
-```
+
 cur.execute(
     """
     CREATE TABLE IF NOT EXISTS settings (
@@ -99,7 +99,7 @@ except sqlite3.OperationalError:
 
 conn.commit()
 conn.close()
-```
+
 
 def upsert_settings(guild_id: int, **kwargs) -> None:
     allowed = {
@@ -216,7 +216,7 @@ max_length=1000,
 placeholder="e.g.  https://i.imgur.com/xyz456.png   |   ignored if use_avatar is on",
 )
 
-```
+
 def __init__(self, use_avatar: bool, save_name: str | None = None,
              post_here: bool = False, is_edit: bool = False, prefill: dict | None = None):
     super().__init__()
@@ -309,7 +309,7 @@ async def on_submit(self, interaction: discord.Interaction):
             )
     else:
         await interaction.response.send_message(embed=embed)
-```
+
 
 # ———————————————––
 
@@ -338,7 +338,7 @@ max_length=1000,
 placeholder="e.g.  https://i.imgur.com/abc123.gif",
 )
 
-```
+
 def __init__(self, prefill: dict | None = None):
     super().__init__()
     if prefill:
@@ -370,7 +370,7 @@ async def on_submit(self, interaction: discord.Interaction):
         "✅ Welcome settings updated! Here's a preview:",
         embed=preview, ephemeral=True,
     )
-```
+
 
 # ———————————————––
 
@@ -383,7 +383,7 @@ async def on_ready():
     init_db()
 print(f"Bot user: {bot.user}")
 
-```
+
 synced = await bot.tree.sync()
 print(f"Synced {len(synced)} global command(s)")
 if GUILD_ID:
@@ -393,7 +393,7 @@ if GUILD_ID:
         print(f"Also synced {len(guild_synced)} guild command(s) — instant update!")
     except Exception as e:
         print(f"Guild sync skipped: {e}")
-```
+
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -420,7 +420,7 @@ async def on_message(message: discord.Message):
 return
 await bot.process_commands(message)
 
-```
+
 conn = get_db()
 cur = conn.cursor()
 cur.execute(
@@ -451,7 +451,7 @@ cur.execute(
 )
 conn.commit()
 conn.close()
-```
+
 
 # ———————————————––
 
