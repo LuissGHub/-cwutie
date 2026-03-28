@@ -34,12 +34,12 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ———————————————––
 
 def get_db() -> sqlite3.Connection:
-conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
 conn.row_factory = sqlite3.Row
 return conn
 
 def init_db() -> None:
-conn = get_db()
+    conn = get_db()
 cur = conn.cursor()
 
 ```
@@ -102,7 +102,7 @@ conn.close()
 ```
 
 def upsert_settings(guild_id: int, **kwargs) -> None:
-allowed = {
+    allowed = {
 "welcome_channel_id",
 "welcome_banner_url", "welcome_theme", "welcome_text",
 }
@@ -127,7 +127,7 @@ THEMES = {
 }
 
 def get_theme_color(name: str | None) -> int:
-if not name:
+    if not name:
 return THEMES["pink"]
 value = name.strip().lower()
 if value in THEMES:
@@ -142,7 +142,7 @@ pass
 return THEMES["pink"]
 
 def build_embed(
-*,
+    *,
 title: str | None,
 description: str | None,
 theme: str = "pink",
@@ -170,12 +170,12 @@ embed.set_footer(text=footer)
 return embed
 
 def guild_only(interaction: discord.Interaction) -> discord.Guild:
-if interaction.guild is None:
+    if interaction.guild is None:
 raise app_commands.CheckFailure("This command only works in a server.")
 return interaction.guild
 
 def get_settings(guild_id: int) -> sqlite3.Row | None:
-conn = get_db()
+    conn = get_db()
 cur = conn.cursor()
 cur.execute("SELECT * FROM settings WHERE guild_id = ?", (guild_id,))
 row = cur.fetchone()
@@ -380,7 +380,7 @@ async def on_submit(self, interaction: discord.Interaction):
 
 @bot.event
 async def on_ready():
-init_db()
+    init_db()
 print(f"Bot user: {bot.user}")
 
 ```
@@ -397,7 +397,7 @@ if GUILD_ID:
 
 @bot.event
 async def on_member_join(member: discord.Member):
-settings = get_settings(member.guild.id)
+    settings = get_settings(member.guild.id)
 if not settings or not settings["welcome_channel_id"]:
 return
 channel = member.guild.get_channel(settings["welcome_channel_id"])
@@ -416,7 +416,7 @@ await channel.send(embed=embed)
 
 @bot.event
 async def on_message(message: discord.Message):
-if message.author.bot:
+    if message.author.bot:
 return
 await bot.process_commands(message)
 
@@ -470,7 +470,7 @@ use_avatar="Use your Discord avatar as the small top-right image",
 save="Name to save it for reuse e.g. rules",
 )
 async def embed_command(
-interaction: discord.Interaction,
+    interaction: discord.Interaction,
 title: str | None = None,
 description: str | None = None,
 color: str = "pink",
@@ -516,7 +516,7 @@ await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="embedlist", description="List all saved embeds")
 async def embedlist(interaction: discord.Interaction):
-guild = guild_only(interaction)
+    guild = guild_only(interaction)
 conn = get_db()
 cur = conn.cursor()
 cur.execute(
@@ -543,7 +543,7 @@ await interaction.response.send_message(embed=embed, ephemeral=True)
 @bot.tree.command(name="embedpost", description="Post a saved embed in the current channel")
 @app_commands.describe(name="Name of the saved embed to post here")
 async def embedpost(interaction: discord.Interaction, name: str):
-guild = guild_only(interaction)
+    guild = guild_only(interaction)
 conn = get_db()
 cur = conn.cursor()
 cur.execute("SELECT * FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
@@ -567,7 +567,7 @@ await interaction.channel.send(embed=embed)
 @bot.tree.command(name="embededit", description="Edit a saved embed — opens form pre-filled with current values")
 @app_commands.describe(name="Name of the embed to edit")
 async def embededit(interaction: discord.Interaction, name: str):
-guild = guild_only(interaction)
+    guild = guild_only(interaction)
 conn = get_db()
 cur = conn.cursor()
 cur.execute("SELECT * FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
@@ -590,7 +590,7 @@ EmbedModal(use_avatar=bool(row["use_avatar"]), save_name=name, is_edit=True, pre
 @bot.tree.command(name="embedchannel", description="Set which channel a saved embed posts to")
 @app_commands.describe(name="Name of the saved embed", channel="Channel to post it in")
 async def embedchannel(interaction: discord.Interaction, name: str, channel: discord.TextChannel):
-guild = guild_only(interaction)
+    guild = guild_only(interaction)
 conn = get_db()
 cur = conn.cursor()
 cur.execute("SELECT id FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
@@ -607,7 +607,7 @@ await interaction.response.send_message(f"✅ **{name}** will post to {channel.m
 @bot.tree.command(name="embeddelete", description="Delete a saved embed")
 @app_commands.describe(name="Name of the embed to delete")
 async def embeddelete(interaction: discord.Interaction, name: str):
-guild = guild_only(interaction)
+    guild = guild_only(interaction)
 conn = get_db()
 cur = conn.cursor()
 cur.execute("DELETE FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
@@ -634,7 +634,7 @@ color="Theme name or hex like #f7cfe3",
 banner_url="Big image URL at the bottom of the welcome embed",
 )
 async def welcome_setup(
-interaction: discord.Interaction,
+    interaction: discord.Interaction,
 welcome_channel: discord.TextChannel,
 welcome_text: str,
 color: str = "pink",
@@ -663,7 +663,7 @@ color="New color — theme name or hex (leave blank to keep current)",
 banner_url="New banner image URL (leave blank to keep current)",
 )
 async def welcome_edit(
-interaction: discord.Interaction,
+    interaction: discord.Interaction,
 welcome_text: str | None = None,
 color: str | None = None,
 banner_url: str | None = None,
@@ -698,7 +698,7 @@ await interaction.response.send_message("✅ Welcome message updated! Preview:",
 @bot.tree.command(name="welcome_test", description="Preview the welcome embed (only visible to you)")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def welcome_test(interaction: discord.Interaction):
-guild = guild_only(interaction)
+    guild = guild_only(interaction)
 settings = get_settings(guild.id)
 if not settings or not settings["welcome_channel_id"]:
 await interaction.response.send_message("Run `/welcome_setup` first.", ephemeral=True)
@@ -716,7 +716,7 @@ await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="themes", description="Show available embed colors and button styles")
 async def themes(interaction: discord.Interaction):
-names = ", ".join(THEMES.keys())
+    names = ", ".join(THEMES.keys())
 await interaction.response.send_message(
 f"**Embed colors:** {names}\nOr use any hex like `#f7cfe3`",
 ephemeral=True,
@@ -732,7 +732,7 @@ ephemeral=True,
 @app_commands.checks.has_permissions(manage_messages=True)
 @app_commands.describe(message="The message to pin at the bottom of this channel")
 async def sticky_set(interaction: discord.Interaction, message: str):
-guild = guild_only(interaction)
+    guild = guild_only(interaction)
 conn = get_db()
 cur = conn.cursor()
 cur.execute(
@@ -746,7 +746,7 @@ await interaction.response.send_message("✅ Sticky message set for this channel
 @bot.tree.command(name="sticky_clear", description="Remove the sticky message from this channel")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def sticky_clear(interaction: discord.Interaction):
-guild = guild_only(interaction)
+    guild = guild_only(interaction)
 conn = get_db()
 cur = conn.cursor()
 cur.execute(
@@ -759,7 +759,7 @@ await interaction.response.send_message("🗑️ Sticky message cleared.", ephem
 
 @bot.tree.command(name="sticky_view", description="See the current sticky message for this channel")
 async def sticky_view(interaction: discord.Interaction):
-guild = guild_only(interaction)
+    guild = guild_only(interaction)
 conn = get_db()
 cur = conn.cursor()
 cur.execute(
