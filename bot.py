@@ -78,6 +78,17 @@ def init_db() -> None:
         """
     )
 
+    cur.execute(
+    """
+    CREATE TABLE IF NOT EXISTS sticky_messages (
+        guild_id INTEGER NOT NULL,
+        channel_id INTEGER NOT NULL,
+        message TEXT NOT NULL,
+        PRIMARY KEY (guild_id, channel_id)
+    )
+    """
+)
+    
     conn.commit()
     conn.close()
 
@@ -672,7 +683,53 @@ async def themes(interaction: discord.Interaction):
         f"**Embed colors:** {names}\nOr use any hex like `#f7cfe3`",
         ephemeral=True,
     )
+@bot.tree.command(name="sticky_set", description="Set a sticky message for this channel")
+@app_commands.checks.has_permissions(manage_messages=True)
+@app_commands.describe(message="The message to pin at the bottom of this channel")
+async def sticky_set(interaction: discord.Interaction, message: str):
+    guild = guild_only(interaction)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT OR REPLACE INTO sticky_messages (guild_id, channel_id, message) VALUES (?, ?, ?)",
+        (guild.id, interaction.channel_id, message),
+    )
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ Sticky message set for this channel!", ephemeral=True)
 
+
+@bot.tree.command(name="sticky_clear", description="Remove the sticky message from this channel")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def sticky_clear(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM sticky_messages WHERE guild_id = ? AND channel_id = ?",
+        (guild.id, interaction.channel_id),
+    )
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message("🗑️ Sticky message cleared.", ephemeral=True)
+
+
+@bot.tree.command(name="sticky_view", description="See the current sticky message for this channel")
+async def sticky_view(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT message FROM sticky_messages WHERE guild_id = ? AND channel_id = ?",
+        (guild.id, interaction.channel_id),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        await interaction.response.send_message("No sticky message set for this channel.", ephemeral=True)
+        return
+    embed = build_embed(title=None, description=row["message"], theme="pink")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable is not set")
