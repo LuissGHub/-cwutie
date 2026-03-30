@@ -837,6 +837,7 @@ class VerifyView(discord.ui.View):
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
     role="Role to assign when someone clicks verify",
+    channel="Channel to post the verify embed in (defaults to current channel)",
     title="Embed title (default: verify !)",
     description="Embed description text — supports newlines with \\n",
     color="Theme name or hex color (default: pink)",
@@ -844,6 +845,7 @@ class VerifyView(discord.ui.View):
 async def verify_setup(
     interaction: discord.Interaction,
     role: discord.Role,
+    channel: discord.TextChannel | None = None,
     title: str = "verify !",
     description: str = "ξ θe account must be 30 days old to verify\nξ θe no vpns work when verifying\nξ θe must read rules before verifying\nξ θe click ✔ below to verify",
     color: str = "pink",
@@ -851,6 +853,7 @@ async def verify_setup(
     guild = guild_only(interaction)
     upsert_settings(guild.id, verify_role_id=role.id)
 
+    target = channel or interaction.channel
     embed = build_embed(
         title=title,
         description=description.replace("\\n", "\n"),
@@ -858,9 +861,9 @@ async def verify_setup(
     )
 
     await interaction.response.defer(ephemeral=True)
-    await interaction.channel.send(embed=embed, view=VerifyView())
+    await target.send(embed=embed, view=VerifyView())
     await interaction.followup.send(
-        f"✅ Verify embed posted! Role **{role.name}** will be assigned on click.", ephemeral=True
+        f"✅ Verify embed posted in {target.mention}! Role **{role.name}** will be assigned on click.", ephemeral=True
     )
 
 
