@@ -1,4 +1,3 @@
-
 import os
 import sqlite3
 import asyncio
@@ -58,7 +57,7 @@ def init_db() -> None:
         """
     )
 
-    for col in ["welcome_text", "welcome_banner_url", "welcome_theme"]:
+    for col in ["welcome_text", "welcome_banner_url", "welcome_theme", "verify_role_id"]:
         try:
             cur.execute(f"ALTER TABLE settings ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
@@ -110,6 +109,7 @@ def upsert_settings(guild_id: int, **kwargs) -> None:
         "welcome_banner_url",
         "welcome_theme",
         "welcome_text",
+        "verify_role_id",
     }
     updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not updates:
@@ -419,6 +419,7 @@ class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
 @bot.event
 async def on_ready():
     init_db()
+    bot.add_view(VerifyView())  # re-register persistent verify button
     print(f"Bot user: {bot.user}")
 
     synced = await bot.tree.sync()
@@ -776,6 +777,90 @@ async def themes(interaction: discord.Interaction):
     await interaction.response.send_message(
         f"**Embed colors:** {names}\nOr use any hex like `#f7cfe3`",
         ephemeral=True,
+    )
+
+
+# ———————————————––
+
+# Verify Button
+
+# ———————————————––
+
+
+class VerifyView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="✔ press !",
+        style=discord.ButtonStyle.secondary,
+        custom_id="verify_button",
+    )
+    async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("This only works in a server.", ephemeral=True)
+            return
+
+        settings = get_settings(guild.id)
+        role_id = settings["verify_role_id"] if settings else None
+        if not role_id:
+            await interaction.response.send_message(
+                "⚠️ No verify role set. Ask an admin to run `/verify_setup`.", ephemeral=True
+            )
+            return
+
+        role = guild.get_role(int(role_id))
+        if role is None:
+            await interaction.response.send_message(
+                "⚠️ Verify role not found — it may have been deleted. Ask an admin to re-run `/verify_setup`.",
+                ephemeral=True,
+            )
+            return
+
+        member = interaction.user
+        if role in member.roles:
+            await interaction.response.send_message("✅ You're already verified!", ephemeral=True)
+            return
+
+        try:
+            await member.add_roles(role, reason="Self-verified via verify button")
+            await interaction.response.send_message("✅ You've been verified!", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "⚠️ I don't have permission to assign that role. Make sure my role is above the verify role.",
+                ephemeral=True,
+            )
+
+
+@bot.tree.command(name="verify_setup", description="Post a verify embed with a button that auto-assigns a role")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    role="Role to assign when someone clicks verify",
+    title="Embed title (default: verify !)",
+    description="Embed description text — supports newlines with \\n",
+    color="Theme name or hex color (default: pink)",
+)
+async def verify_setup(
+    interaction: discord.Interaction,
+    role: discord.Role,
+    title: str = "verify !",
+    description: str = "ξ θe account must be 30 days old to verify\nξ θe no vpns work when verifying\nξ θe must read rules before verifying\nξ θe click ✔ below to verify",
+    color: str = "pink",
+):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, verify_role_id=role.id)
+
+    embed = build_embed(
+        title=title,
+        description=description.replace("\\n", "\n"),
+        theme=color,
+    )
+
+    await interaction.response.defer(ephemeral=True)
+    await interaction.channel.send(embed=embed, view=VerifyView())
+    await interaction.followup.send(
+        f"✅ Verify embed posted! Role **{role.name}** will be assigned on click.", ephemeral=True
     )
 
 
