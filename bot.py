@@ -788,7 +788,7 @@ async def themes(interaction: discord.Interaction):
 
 
 class VerifyView(discord.ui.View):
-    def __init__(self, button_label: str = "press !", button_emoji: discord.PartialEmoji | str | None = None):
+    def __init__(self, button_label: str = "", button_emoji: discord.PartialEmoji | str | None = None):
         super().__init__(timeout=None)
         btn = discord.ui.Button(
             label=button_label,
@@ -856,7 +856,7 @@ def parse_emoji(raw: str | None) -> discord.PartialEmoji | str | None:
 @app_commands.describe(
     role="Role to assign when someone clicks verify",
     channel="Channel to post the verify embed in (defaults to current channel)",
-    button_label="Text on the verify button (default: press !)",
+    button_label="Text on the verify button (leave blank for no text)",
     button_emoji="Emoji for the button — paste the emoji directly e.g. <:pinkcheckmark:123456789>",
     title="Embed title (default: verify !)",
     description="Embed description text — supports newlines with \\n",
@@ -866,7 +866,7 @@ async def verify_setup(
     interaction: discord.Interaction,
     role: discord.Role,
     channel: discord.TextChannel | None = None,
-    button_label: str = "press !",
+    button_label: str = "",
     button_emoji: str | None = None,
     title: str = "verify !",
     description: str = "ξ θe account must be 30 days old to verify\nξ θe no vpns work when verifying\nξ θe must read rules before verifying\nξ θe click ✔ below to verify",
