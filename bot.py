@@ -788,10 +788,11 @@ async def themes(interaction: discord.Interaction):
 
 
 class VerifyView(discord.ui.View):
-    def __init__(self, button_label: str = "✔ press !"):
+    def __init__(self, button_label: str = "press !", button_emoji: discord.PartialEmoji | str | None = None):
         super().__init__(timeout=None)
         btn = discord.ui.Button(
             label=button_label,
+            emoji=button_emoji,
             style=discord.ButtonStyle.secondary,
             custom_id="verify_button",
         )
@@ -835,12 +836,28 @@ class VerifyView(discord.ui.View):
             )
 
 
+def parse_emoji(raw: str | None) -> discord.PartialEmoji | str | None:
+    """Parse a custom emoji string like <:name:id> or <a:name:id> into a PartialEmoji, or return as-is for unicode."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    import re
+    m = re.match(r"<(a?):(\w+):(\d+)>", raw)
+    if m:
+        animated = bool(m.group(1))
+        name = m.group(2)
+        emoji_id = int(m.group(3))
+        return discord.PartialEmoji(name=name, id=emoji_id, animated=animated)
+    return raw  # unicode emoji or plain text fallback
+
+
 @bot.tree.command(name="verify_setup", description="Post a verify embed with a button that auto-assigns a role")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
     role="Role to assign when someone clicks verify",
     channel="Channel to post the verify embed in (defaults to current channel)",
-    button_label="Text on the verify button (default: ✔ press !)",
+    button_label="Text on the verify button (default: press !)",
+    button_emoji="Emoji for the button — paste the emoji directly e.g. <:pinkcheckmark:123456789>",
     title="Embed title (default: verify !)",
     description="Embed description text — supports newlines with \\n",
     color="Theme name or hex color (default: pink)",
@@ -849,7 +866,8 @@ async def verify_setup(
     interaction: discord.Interaction,
     role: discord.Role,
     channel: discord.TextChannel | None = None,
-    button_label: str = "✔ press !",
+    button_label: str = "press !",
+    button_emoji: str | None = None,
     title: str = "verify !",
     description: str = "ξ θe account must be 30 days old to verify\nξ θe no vpns work when verifying\nξ θe must read rules before verifying\nξ θe click ✔ below to verify",
     color: str = "pink",
@@ -864,8 +882,9 @@ async def verify_setup(
         theme=color,
     )
 
+    parsed_emoji = parse_emoji(button_emoji)
     await interaction.response.defer(ephemeral=True)
-    await target.send(embed=embed, view=VerifyView(button_label=button_label))
+    await target.send(embed=embed, view=VerifyView(button_label=button_label, button_emoji=parsed_emoji))
     await interaction.followup.send(
         f"✅ Verify embed posted in {target.mention}! Role **{role.name}** will be assigned on click.", ephemeral=True
     )
