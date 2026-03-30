@@ -788,15 +788,17 @@ async def themes(interaction: discord.Interaction):
 
 
 class VerifyView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, button_label: str = "✔ press !"):
         super().__init__(timeout=None)
+        btn = discord.ui.Button(
+            label=button_label,
+            style=discord.ButtonStyle.secondary,
+            custom_id="verify_button",
+        )
+        btn.callback = self.verify_callback
+        self.add_item(btn)
 
-    @discord.ui.button(
-        label="✔ press !",
-        style=discord.ButtonStyle.secondary,
-        custom_id="verify_button",
-    )
-    async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def verify_callback(self, interaction: discord.Interaction):
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message("This only works in a server.", ephemeral=True)
@@ -838,6 +840,7 @@ class VerifyView(discord.ui.View):
 @app_commands.describe(
     role="Role to assign when someone clicks verify",
     channel="Channel to post the verify embed in (defaults to current channel)",
+    button_label="Text on the verify button (default: ✔ press !)",
     title="Embed title (default: verify !)",
     description="Embed description text — supports newlines with \\n",
     color="Theme name or hex color (default: pink)",
@@ -846,6 +849,7 @@ async def verify_setup(
     interaction: discord.Interaction,
     role: discord.Role,
     channel: discord.TextChannel | None = None,
+    button_label: str = "✔ press !",
     title: str = "verify !",
     description: str = "ξ θe account must be 30 days old to verify\nξ θe no vpns work when verifying\nξ θe must read rules before verifying\nξ θe click ✔ below to verify",
     color: str = "pink",
@@ -861,7 +865,7 @@ async def verify_setup(
     )
 
     await interaction.response.defer(ephemeral=True)
-    await target.send(embed=embed, view=VerifyView())
+    await target.send(embed=embed, view=VerifyView(button_label=button_label))
     await interaction.followup.send(
         f"✅ Verify embed posted in {target.mention}! Role **{role.name}** will be assigned on click.", ephemeral=True
     )
