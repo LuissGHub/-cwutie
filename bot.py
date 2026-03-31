@@ -446,6 +446,7 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member: discord.Member):
+    await asyncio.sleep(1)  # small delay so Discord resolves the member properly
     settings = get_settings(member.guild.id)
     if not settings or not settings["welcome_channel_id"]:
         return
