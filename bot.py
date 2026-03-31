@@ -931,6 +931,7 @@ async def verify_setup(
     button_label="Text on the verify button (leave blank to keep current)",
     button_emoji="Emoji for the button (leave blank to keep current)",
     title="Embed title (leave blank to keep current)",
+    clear_title="Set to True to remove the title entirely",
     description="Embed description — supports \\n for newlines (leave blank to keep current)",
     color="Theme name or hex color (leave blank to keep current)",
     image="Big image URL (leave blank to keep current)",
@@ -943,6 +944,7 @@ async def verify_edit(
     button_label: str | None = None,
     button_emoji: str | None = None,
     title: str | None = None,
+    clear_title: bool = False,
     description: str | None = None,
     color: str | None = None,
     image: str | None = None,
@@ -974,7 +976,7 @@ async def verify_edit(
     final_channel     = channel or guild.get_channel(int(old_channel_id))
     final_label       = button_label if button_label is not None else (settings["verify_button_label"] or "")
     final_emoji_raw   = button_emoji if button_emoji is not None else (settings["verify_button_emoji"] or None)
-    final_title       = title or settings["verify_title"] or "verify !"
+    final_title       = None if clear_title else (title or settings["verify_title"] or "verify !")
     final_description = description or settings["verify_description"] or ""
     final_color       = color or settings["verify_color"] or "pink"
     final_image       = image if image is not None else (settings["verify_image_url"] or None)
