@@ -861,6 +861,7 @@ def parse_emoji(raw: str | None) -> discord.PartialEmoji | str | None:
     title="Embed title (default: verify !)",
     description="Embed description text — supports newlines with \\n",
     color="Theme name or hex color (default: pink)",
+    image="Big image URL shown at the bottom of the embed",
 )
 async def verify_setup(
     interaction: discord.Interaction,
@@ -871,6 +872,7 @@ async def verify_setup(
     title: str = "verify !",
     description: str = "ξ θe account must be 30 days old to verify\nξ θe no vpns work when verifying\nξ θe must read rules before verifying\nξ θe click ✔ below to verify",
     color: str = "pink",
+    image: str | None = None,
 ):
     guild = guild_only(interaction)
     upsert_settings(guild.id, verify_role_id=role.id)
@@ -880,6 +882,7 @@ async def verify_setup(
         title=title,
         description=description.replace("\\n", "\n"),
         theme=color,
+        image=image,
     )
 
     parsed_emoji = parse_emoji(button_emoji)
