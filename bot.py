@@ -57,7 +57,10 @@ def init_db() -> None:
         """
     )
 
-    for col in ["welcome_text", "welcome_banner_url", "welcome_theme", "verify_role_id"]:
+    for col in ["welcome_text", "welcome_banner_url", "welcome_theme", "verify_role_id",
+                "verify_message_id", "verify_channel_id", "verify_button_label",
+                "verify_button_emoji", "verify_title", "verify_description",
+                "verify_color", "verify_image_url"]:
         try:
             cur.execute(f"ALTER TABLE settings ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
@@ -110,6 +113,14 @@ def upsert_settings(guild_id: int, **kwargs) -> None:
         "welcome_theme",
         "welcome_text",
         "verify_role_id",
+        "verify_message_id",
+        "verify_channel_id",
+        "verify_button_label",
+        "verify_button_emoji",
+        "verify_title",
+        "verify_description",
+        "verify_color",
+        "verify_image_url",
     }
     updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not updates:
@@ -875,9 +886,8 @@ async def verify_setup(
     image: str | None = None,
 ):
     guild = guild_only(interaction)
-    upsert_settings(guild.id, verify_role_id=role.id)
-
     target = channel or interaction.channel
+
     embed = build_embed(
         title=title,
         description=description.replace("\\n", "\n"),
@@ -887,9 +897,105 @@ async def verify_setup(
 
     parsed_emoji = parse_emoji(button_emoji)
     await interaction.response.defer(ephemeral=True)
-    await target.send(embed=embed, view=VerifyView(button_label=button_label, button_emoji=parsed_emoji))
+    msg = await target.send(embed=embed, view=VerifyView(button_label=button_label, button_emoji=parsed_emoji))
+
+    upsert_settings(
+        guild.id,
+        verify_role_id=role.id,
+        verify_message_id=msg.id,
+        verify_channel_id=target.id,
+        verify_button_label=button_label,
+        verify_button_emoji=button_emoji or "",
+        verify_title=title,
+        verify_description=description,
+        verify_color=color,
+        verify_image_url=image or "",
+    )
+
     await interaction.followup.send(
         f"✅ Verify embed posted in {target.mention}! Role **{role.name}** will be assigned on click.", ephemeral=True
+    )
+
+
+@bot.tree.command(name="verify_edit", description="Edit the verify embed — deletes the old one and reposts with your changes")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    role="Role to assign on verify (leave blank to keep current)",
+    channel="Channel to repost in (leave blank to keep current channel)",
+    button_label="Text on the verify button (leave blank to keep current)",
+    button_emoji="Emoji for the button (leave blank to keep current)",
+    title="Embed title (leave blank to keep current)",
+    description="Embed description — supports \\n for newlines (leave blank to keep current)",
+    color="Theme name or hex color (leave blank to keep current)",
+    image="Big image URL (leave blank to keep current)",
+)
+async def verify_edit(
+    interaction: discord.Interaction,
+    role: discord.Role | None = None,
+    channel: discord.TextChannel | None = None,
+    button_label: str | None = None,
+    button_emoji: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    color: str | None = None,
+    image: str | None = None,
+):
+    guild = guild_only(interaction)
+    settings = get_settings(guild.id)
+
+    if not settings or not settings["verify_channel_id"]:
+        await interaction.response.send_message("No verify embed set up yet. Run `/verify_setup` first.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    # delete old message
+    old_channel_id = settings["verify_channel_id"]
+    old_message_id = settings["verify_message_id"]
+    if old_channel_id and old_message_id:
+        old_ch = guild.get_channel(int(old_channel_id))
+        if old_ch:
+            try:
+                old_msg = await old_ch.fetch_message(int(old_message_id))
+                await old_msg.delete()
+            except Exception:
+                pass
+
+    # merge new values with saved ones
+    final_role_id     = role.id if role else int(settings["verify_role_id"])
+    final_channel     = channel or guild.get_channel(int(old_channel_id))
+    final_label       = button_label if button_label is not None else (settings["verify_button_label"] or "")
+    final_emoji_raw   = button_emoji if button_emoji is not None else (settings["verify_button_emoji"] or None)
+    final_title       = title or settings["verify_title"] or "verify !"
+    final_description = description or settings["verify_description"] or ""
+    final_color       = color or settings["verify_color"] or "pink"
+    final_image       = image if image is not None else (settings["verify_image_url"] or None)
+
+    embed = build_embed(
+        title=final_title,
+        description=final_description.replace("\\n", "\n"),
+        theme=final_color,
+        image=final_image or None,
+    )
+
+    parsed_emoji = parse_emoji(final_emoji_raw)
+    msg = await final_channel.send(embed=embed, view=VerifyView(button_label=final_label, button_emoji=parsed_emoji))
+
+    upsert_settings(
+        guild.id,
+        verify_role_id=final_role_id,
+        verify_message_id=msg.id,
+        verify_channel_id=final_channel.id,
+        verify_button_label=final_label,
+        verify_button_emoji=final_emoji_raw or "",
+        verify_title=final_title,
+        verify_description=final_description,
+        verify_color=final_color,
+        verify_image_url=final_image or "",
+    )
+
+    await interaction.followup.send(
+        f"✅ Verify embed updated in {final_channel.mention}!", ephemeral=True
     )
 
 
