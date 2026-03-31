@@ -60,7 +60,7 @@ def init_db() -> None:
     for col in ["welcome_text", "welcome_banner_url", "welcome_theme", "verify_role_id",
                 "verify_message_id", "verify_channel_id", "verify_button_label",
                 "verify_button_emoji", "verify_title", "verify_description",
-                "verify_color", "verify_image_url"]:
+                "verify_color", "verify_image_url", "verify_thumbnail_url"]:
         try:
             cur.execute(f"ALTER TABLE settings ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
@@ -121,6 +121,7 @@ def upsert_settings(guild_id: int, **kwargs) -> None:
         "verify_description",
         "verify_color",
         "verify_image_url",
+        "verify_thumbnail_url",
     }
     updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not updates:
@@ -874,6 +875,7 @@ def parse_emoji(raw: str | None) -> discord.PartialEmoji | str | None:
     description="Embed description text — supports newlines with \\n",
     color="Theme name or hex color (default: pink)",
     image="Big image URL shown at the bottom of the embed",
+    thumbnail="Small image URL shown in the top right corner",
 )
 async def verify_setup(
     interaction: discord.Interaction,
@@ -885,6 +887,7 @@ async def verify_setup(
     description: str = "ξ θe account must be 30 days old to verify\nξ θe no vpns work when verifying\nξ θe must read rules before verifying\nξ θe click ✔ below to verify",
     color: str = "pink",
     image: str | None = None,
+    thumbnail: str | None = None,
 ):
     guild = guild_only(interaction)
     target = channel or interaction.channel
@@ -894,6 +897,7 @@ async def verify_setup(
         description=description.replace("\\n", "\n"),
         theme=color,
         image=image,
+        thumbnail=thumbnail,
     )
 
     parsed_emoji = parse_emoji(button_emoji)
@@ -911,6 +915,7 @@ async def verify_setup(
         verify_description=description,
         verify_color=color,
         verify_image_url=image or "",
+        verify_thumbnail_url=thumbnail or "",
     )
 
     await interaction.followup.send(
@@ -929,6 +934,7 @@ async def verify_setup(
     description="Embed description — supports \\n for newlines (leave blank to keep current)",
     color="Theme name or hex color (leave blank to keep current)",
     image="Big image URL (leave blank to keep current)",
+    thumbnail="Small image URL top right (leave blank to keep current)",
 )
 async def verify_edit(
     interaction: discord.Interaction,
@@ -940,6 +946,7 @@ async def verify_edit(
     description: str | None = None,
     color: str | None = None,
     image: str | None = None,
+    thumbnail: str | None = None,
 ):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
@@ -971,12 +978,14 @@ async def verify_edit(
     final_description = description or settings["verify_description"] or ""
     final_color       = color or settings["verify_color"] or "pink"
     final_image       = image if image is not None else (settings["verify_image_url"] or None)
+    final_thumbnail   = thumbnail if thumbnail is not None else (settings["verify_thumbnail_url"] or None)
 
     embed = build_embed(
         title=final_title,
         description=final_description.replace("\\n", "\n"),
         theme=final_color,
         image=final_image or None,
+        thumbnail=final_thumbnail or None,
     )
 
     parsed_emoji = parse_emoji(final_emoji_raw)
@@ -993,6 +1002,7 @@ async def verify_edit(
         verify_description=final_description,
         verify_color=final_color,
         verify_image_url=final_image or "",
+        verify_thumbnail_url=final_thumbnail or "",
     )
 
     await interaction.followup.send(
