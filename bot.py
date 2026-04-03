@@ -1120,29 +1120,21 @@ async def sticky_view(interaction: discord.Interaction):
 @app_commands.describe(
     trigger="The trigger word after the dot — e.g. 'ask' for .ask",
     message="The message to send when triggered — supports \\n for newlines",
-    role1="First role to ping (optional)",
-    role2="Second role to ping (optional)",
-    role3="Third role to ping (optional)",
 )
 async def autoresponder_add(
     interaction: discord.Interaction,
     trigger: str,
     message: str,
-    role1: discord.Role | None = None,
-    role2: discord.Role | None = None,
-    role3: discord.Role | None = None,
 ):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip().lstrip(".")
-
-    role_ids = ",".join(str(r.id) for r in [role1, role2, role3] if r is not None) or None
 
     conn = get_db()
     cur = conn.cursor()
     try:
         cur.execute(
             "INSERT INTO autoresponders (guild_id, trigger, message, ping_roles) VALUES (?, ?, ?, ?)",
-            (guild.id, trigger, message, role_ids),
+            (guild.id, trigger, message, None),
         )
         conn.commit()
         await interaction.response.send_message(f"✅ Autoresponder `.{trigger}` created!", ephemeral=True)
@@ -1159,19 +1151,11 @@ async def autoresponder_add(
 @app_commands.describe(
     trigger="The trigger to edit — e.g. 'ask' for .ask",
     message="New message (leave blank to keep current)",
-    role1="First role to ping (leave blank to keep current)",
-    role2="Second role to ping (leave blank to keep current)",
-    role3="Third role to ping (leave blank to keep current)",
-    clear_roles="Set to True to remove all role pings",
 )
 async def autoresponder_edit(
     interaction: discord.Interaction,
     trigger: str,
     message: str | None = None,
-    role1: discord.Role | None = None,
-    role2: discord.Role | None = None,
-    role3: discord.Role | None = None,
-    clear_roles: bool = False,
 ):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip().lstrip(".")
@@ -1186,16 +1170,10 @@ async def autoresponder_edit(
         return
 
     final_message = message if message is not None else row["message"]
-    if clear_roles:
-        final_roles = None
-    elif any([role1, role2, role3]):
-        final_roles = ",".join(str(r.id) for r in [role1, role2, role3] if r is not None) or None
-    else:
-        final_roles = row["ping_roles"]
 
     cur.execute(
-        "UPDATE autoresponders SET message = ?, ping_roles = ? WHERE guild_id = ? AND trigger = ?",
-        (final_message, final_roles, guild.id, trigger),
+        "UPDATE autoresponders SET message = ? WHERE guild_id = ? AND trigger = ?",
+        (final_message, guild.id, trigger),
     )
     conn.commit()
     conn.close()
