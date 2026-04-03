@@ -102,6 +102,19 @@ def init_db() -> None:
     except sqlite3.OperationalError:
         pass
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS autoresponders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            trigger TEXT NOT NULL,
+            message TEXT NOT NULL,
+            ping_roles TEXT,
+            UNIQUE(guild_id, trigger)
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -471,6 +484,29 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
     await bot.process_commands(message)
+
+    if message.guild is None:
+        return
+
+    # autoresponder check
+    content = message.content.strip()
+    if content.startswith("."):
+        trigger = content[1:].split()[0].lower() if len(content) > 1 else ""
+        if trigger:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT message, ping_roles FROM autoresponders WHERE guild_id = ? AND trigger = ?",
+                (message.guild.id, trigger),
+            )
+            ar = cur.fetchone()
+            conn.close()
+            if ar:
+                ping_text = ""
+                if ar["ping_roles"]:
+                    role_ids = [r for r in ar["ping_roles"].split(",") if r]
+                    ping_text = " ".join(f"<@&{rid}>" for rid in role_ids) + " "
+                await message.channel.send(ping_text + ar["message"].replace("\\n", "\n"))
 
     if message.guild is None:
         return
@@ -1069,6 +1105,140 @@ async def sticky_view(interaction: discord.Interaction):
     description=row["message"].replace("\\n", "\n"),
     theme="pink"
 )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ———————————————––
+
+# Commands — Autoresponder
+
+# ———————————————––
+
+
+@bot.tree.command(name="autoresponder_add", description="Create a new autoresponder trigger")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    trigger="The trigger word after the dot — e.g. 'ask' for .ask",
+    message="The message to send when triggered — supports \\n for newlines",
+    role1="First role to ping (optional)",
+    role2="Second role to ping (optional)",
+    role3="Third role to ping (optional)",
+)
+async def autoresponder_add(
+    interaction: discord.Interaction,
+    trigger: str,
+    message: str,
+    role1: discord.Role | None = None,
+    role2: discord.Role | None = None,
+    role3: discord.Role | None = None,
+):
+    guild = guild_only(interaction)
+    trigger = trigger.lower().strip().lstrip(".")
+
+    role_ids = ",".join(str(r.id) for r in [role1, role2, role3] if r is not None) or None
+
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "INSERT INTO autoresponders (guild_id, trigger, message, ping_roles) VALUES (?, ?, ?, ?)",
+            (guild.id, trigger, message, role_ids),
+        )
+        conn.commit()
+        await interaction.response.send_message(f"✅ Autoresponder `.{trigger}` created!", ephemeral=True)
+    except sqlite3.IntegrityError:
+        await interaction.response.send_message(
+            f"❌ A trigger `.{trigger}` already exists. Use `/autoresponder_edit` to update it.", ephemeral=True
+        )
+    finally:
+        conn.close()
+
+
+@bot.tree.command(name="autoresponder_edit", description="Edit an existing autoresponder trigger")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    trigger="The trigger to edit — e.g. 'ask' for .ask",
+    message="New message (leave blank to keep current)",
+    role1="First role to ping (leave blank to keep current)",
+    role2="Second role to ping (leave blank to keep current)",
+    role3="Third role to ping (leave blank to keep current)",
+    clear_roles="Set to True to remove all role pings",
+)
+async def autoresponder_edit(
+    interaction: discord.Interaction,
+    trigger: str,
+    message: str | None = None,
+    role1: discord.Role | None = None,
+    role2: discord.Role | None = None,
+    role3: discord.Role | None = None,
+    clear_roles: bool = False,
+):
+    guild = guild_only(interaction)
+    trigger = trigger.lower().strip().lstrip(".")
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM autoresponders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        await interaction.response.send_message(f"No autoresponder `.{trigger}` found.", ephemeral=True)
+        return
+
+    final_message = message if message is not None else row["message"]
+    if clear_roles:
+        final_roles = None
+    elif any([role1, role2, role3]):
+        final_roles = ",".join(str(r.id) for r in [role1, role2, role3] if r is not None) or None
+    else:
+        final_roles = row["ping_roles"]
+
+    cur.execute(
+        "UPDATE autoresponders SET message = ?, ping_roles = ? WHERE guild_id = ? AND trigger = ?",
+        (final_message, final_roles, guild.id, trigger),
+    )
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ Autoresponder `.{trigger}` updated!", ephemeral=True)
+
+
+@bot.tree.command(name="autoresponder_remove", description="Delete an autoresponder trigger")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(trigger="The trigger to delete — e.g. 'ask' for .ask")
+async def autoresponder_remove(interaction: discord.Interaction, trigger: str):
+    guild = guild_only(interaction)
+    trigger = trigger.lower().strip().lstrip(".")
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM autoresponders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+    if deleted:
+        await interaction.response.send_message(f"🗑️ Autoresponder `.{trigger}` deleted.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"No autoresponder `.{trigger}` found.", ephemeral=True)
+
+
+@bot.tree.command(name="autoresponder_list", description="List all autoresponder triggers")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def autoresponder_list(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT trigger, message, ping_roles FROM autoresponders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
+    rows = cur.fetchall()
+    conn.close()
+    if not rows:
+        await interaction.response.send_message("No autoresponders set up yet.", ephemeral=True)
+        return
+    embed = discord.Embed(title="⚡ Autoresponders", color=get_theme_color("pink"))
+    for row in rows:
+        roles_text = ""
+        if row["ping_roles"]:
+            roles_text = "\nPings: " + " ".join(f"<@&{r}>" for r in row["ping_roles"].split(",") if r)
+        preview = row["message"][:60] + ("..." if len(row["message"]) > 60 else "")
+        embed.add_field(name=f"`.{row['trigger']}`", value=f"{preview}{roles_text}", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
