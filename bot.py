@@ -60,7 +60,8 @@ def init_db() -> None:
     for col in ["welcome_text", "welcome_banner_url", "welcome_theme", "verify_role_id",
                 "verify_message_id", "verify_channel_id", "verify_button_label",
                 "verify_button_emoji", "verify_title", "verify_description",
-                "verify_color", "verify_image_url", "verify_thumbnail_url"]:
+                "verify_color", "verify_image_url", "verify_thumbnail_url",
+                "verify_success_message"]:
         try:
             cur.execute(f"ALTER TABLE settings ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
@@ -135,6 +136,7 @@ def upsert_settings(guild_id: int, **kwargs) -> None:
         "verify_color",
         "verify_image_url",
         "verify_thumbnail_url",
+        "verify_success_message",
     }
     updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not updates:
@@ -872,7 +874,8 @@ class VerifyView(discord.ui.View):
 
         try:
             await member.add_roles(role, reason="Self-verified via verify button")
-            await interaction.response.send_message("✅ You've been verified!", ephemeral=True)
+            success_msg = (settings.get("verify_success_message") or "✅ You've been verified!") if settings else "✅ You've been verified!"
+            await interaction.response.send_message(success_msg, ephemeral=True)
         except discord.Forbidden:
             await interaction.response.send_message(
                 "⚠️ I don't have permission to assign that role. Make sure my role is above the verify role.",
@@ -907,6 +910,7 @@ def parse_emoji(raw: str | None) -> discord.PartialEmoji | str | None:
     color="Theme name or hex color (default: pink)",
     image="Big image URL shown at the bottom of the embed",
     thumbnail="Small image URL shown in the top right corner",
+    success_message="Message shown to the user after they verify (default: ✅ You've been verified!)",
 )
 async def verify_setup(
     interaction: discord.Interaction,
@@ -919,6 +923,7 @@ async def verify_setup(
     color: str = "pink",
     image: str | None = None,
     thumbnail: str | None = None,
+    success_message: str = "✅ You've been verified!",
 ):
     guild = guild_only(interaction)
     target = channel or interaction.channel
@@ -947,6 +952,7 @@ async def verify_setup(
         verify_color=color,
         verify_image_url=image or "",
         verify_thumbnail_url=thumbnail or "",
+        verify_success_message=success_message,
     )
 
     await interaction.followup.send(
@@ -967,6 +973,7 @@ async def verify_setup(
     color="Theme name or hex color (leave blank to keep current)",
     image="Big image URL (leave blank to keep current)",
     thumbnail="Small image URL top right (leave blank to keep current)",
+    success_message="Message shown after verifying (leave blank to keep current)",
 )
 async def verify_edit(
     interaction: discord.Interaction,
@@ -980,6 +987,7 @@ async def verify_edit(
     color: str | None = None,
     image: str | None = None,
     thumbnail: str | None = None,
+    success_message: str | None = None,
 ):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
@@ -1012,6 +1020,7 @@ async def verify_edit(
     final_color       = color or settings["verify_color"] or "pink"
     final_image       = image if image is not None else (settings["verify_image_url"] or None)
     final_thumbnail   = thumbnail if thumbnail is not None else (settings["verify_thumbnail_url"] or None)
+    final_success     = success_message if success_message is not None else (settings["verify_success_message"] or "✅ You've been verified!")
 
     embed = build_embed(
         title=final_title,
@@ -1036,6 +1045,7 @@ async def verify_edit(
         verify_color=final_color,
         verify_image_url=final_image or "",
         verify_thumbnail_url=final_thumbnail or "",
+        verify_success_message=final_success,
     )
 
     await interaction.followup.send(
