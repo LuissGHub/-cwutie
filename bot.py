@@ -61,7 +61,7 @@ def init_db() -> None:
                 "verify_message_id", "verify_channel_id", "verify_button_label",
                 "verify_button_emoji", "verify_title", "verify_description",
                 "verify_color", "verify_image_url", "verify_thumbnail_url",
-                "verify_success_message"]:
+                "verify_success_message", "verify_already_message"]:
         try:
             cur.execute(f"ALTER TABLE settings ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
@@ -137,6 +137,7 @@ def upsert_settings(guild_id: int, **kwargs) -> None:
         "verify_image_url",
         "verify_thumbnail_url",
         "verify_success_message",
+        "verify_already_message",
     }
     updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not updates:
@@ -869,7 +870,8 @@ class VerifyView(discord.ui.View):
 
         member = interaction.user
         if role in member.roles:
-            await interaction.response.send_message("✅ You're already verified!", ephemeral=True)
+            already_msg = (settings.get("verify_already_message") or "✅ You're already verified!") if settings else "✅ You're already verified!"
+            await interaction.response.send_message(already_msg, ephemeral=True)
             return
 
         try:
@@ -911,6 +913,7 @@ def parse_emoji(raw: str | None) -> discord.PartialEmoji | str | None:
     image="Big image URL shown at the bottom of the embed",
     thumbnail="Small image URL shown in the top right corner",
     success_message="Message shown to the user after they verify (default: ✅ You've been verified!)",
+    already_verified_message="Message shown if they're already verified (default: ✅ You're already verified!)",
 )
 async def verify_setup(
     interaction: discord.Interaction,
@@ -924,6 +927,7 @@ async def verify_setup(
     image: str | None = None,
     thumbnail: str | None = None,
     success_message: str = "✅ You've been verified!",
+    already_verified_message: str = "✅ You're already verified!",
 ):
     guild = guild_only(interaction)
     target = channel or interaction.channel
@@ -953,6 +957,7 @@ async def verify_setup(
         verify_image_url=image or "",
         verify_thumbnail_url=thumbnail or "",
         verify_success_message=success_message,
+        verify_already_message=already_verified_message,
     )
 
     await interaction.followup.send(
@@ -974,6 +979,7 @@ async def verify_setup(
     image="Big image URL (leave blank to keep current)",
     thumbnail="Small image URL top right (leave blank to keep current)",
     success_message="Message shown after verifying (leave blank to keep current)",
+    already_verified_message="Message shown if already verified (leave blank to keep current)",
 )
 async def verify_edit(
     interaction: discord.Interaction,
@@ -988,6 +994,7 @@ async def verify_edit(
     image: str | None = None,
     thumbnail: str | None = None,
     success_message: str | None = None,
+    already_verified_message: str | None = None,
 ):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
@@ -1021,6 +1028,7 @@ async def verify_edit(
     final_image       = image if image is not None else (settings["verify_image_url"] or None)
     final_thumbnail   = thumbnail if thumbnail is not None else (settings["verify_thumbnail_url"] or None)
     final_success     = success_message if success_message is not None else (settings["verify_success_message"] or "✅ You've been verified!")
+    final_already     = already_verified_message if already_verified_message is not None else (settings["verify_already_message"] or "✅ You're already verified!")
 
     embed = build_embed(
         title=final_title,
@@ -1046,6 +1054,7 @@ async def verify_edit(
         verify_image_url=final_image or "",
         verify_thumbnail_url=final_thumbnail or "",
         verify_success_message=final_success,
+        verify_already_message=final_already,
     )
 
     await interaction.followup.send(
