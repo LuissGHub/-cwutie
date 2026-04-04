@@ -834,19 +834,16 @@ async def themes(interaction: discord.Interaction):
 # ———————————————––
 
 
-class VerifyView(discord.ui.View):
-    def __init__(self, button_label: str = "", button_emoji: discord.PartialEmoji | str | None = None):
-        super().__init__(timeout=None)
-        btn = discord.ui.Button(
-            label=button_label,
-            emoji=button_emoji,
+class VerifyButton(discord.ui.Button):
+    def __init__(self, label: str = "", emoji=None):
+        super().__init__(
+            label=label,
+            emoji=emoji,
             style=discord.ButtonStyle.secondary,
             custom_id="verify_button",
         )
-        btn.callback = self.verify_callback
-        self.add_item(btn)
 
-    async def verify_callback(self, interaction: discord.Interaction):
+    async def callback(self, interaction: discord.Interaction):
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message("This only works in a server.", ephemeral=True)
@@ -870,19 +867,25 @@ class VerifyView(discord.ui.View):
 
         member = interaction.user
         if role in member.roles:
-            already_msg = (settings.get("verify_already_message") or "✅ You're already verified!") if settings else "✅ You're already verified!"
+            already_msg = (settings["verify_already_message"] or "✅ You're already verified!") if settings else "✅ You're already verified!"
             await interaction.response.send_message(already_msg, ephemeral=True)
             return
 
         try:
             await member.add_roles(role, reason="Self-verified via verify button")
-            success_msg = (settings.get("verify_success_message") or "✅ You've been verified!") if settings else "✅ You've been verified!"
+            success_msg = (settings["verify_success_message"] or "✅ You've been verified!") if settings else "✅ You've been verified!"
             await interaction.response.send_message(success_msg, ephemeral=True)
         except discord.Forbidden:
             await interaction.response.send_message(
                 "⚠️ I don't have permission to assign that role. Make sure my role is above the verify role.",
                 ephemeral=True,
             )
+
+
+class VerifyView(discord.ui.View):
+    def __init__(self, button_label: str = "", button_emoji: discord.PartialEmoji | str | None = None):
+        super().__init__(timeout=None)
+        self.add_item(VerifyButton(label=button_label, emoji=button_emoji))
 
 
 def parse_emoji(raw: str | None) -> discord.PartialEmoji | str | None:
