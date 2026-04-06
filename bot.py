@@ -835,9 +835,9 @@ async def themes(interaction: discord.Interaction):
 
 
 class VerifyButton(discord.ui.Button):
-    def __init__(self, label: str = "", emoji=None):
+    def __init__(self, label: str = "Verify", emoji=None):
         super().__init__(
-            label=label,
+            label=label or "Verify",
             emoji=emoji,
             style=discord.ButtonStyle.secondary,
             custom_id="verify_button",
@@ -845,134 +845,37 @@ class VerifyButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         guild = interaction.guild
-        if guild is None:
-            await interaction.response.send_message("This only works in a server.", ephemeral=True)
-            return
-
         settings = get_settings(guild.id)
         role_id = settings["verify_role_id"] if settings else None
+
         if not role_id:
-            await interaction.response.send_message(
-                "⚠️ No verify role set. Ask an admin to run `/verify_setup`.", ephemeral=True
-            )
-            return
+            return await interaction.response.send_message("⚠️ No verify role set.", ephemeral=True)
 
         role = guild.get_role(int(role_id))
-        if role is None:
-            await interaction.response.send_message(
-                "⚠️ Verify role not found — it may have been deleted. Ask an admin to re-run `/verify_setup`.",
-                ephemeral=True,
-            )
-            return
+        if not role:
+            return await interaction.response.send_message("⚠️ Verify role not found.", ephemeral=True)
 
-        member = interaction.user
-        if role in member.roles:
-            already_msg = (settings["verify_already_message"] or "✅ You're already verified!") if settings else "✅ You're already verified!"
-            await interaction.response.send_message(already_msg, ephemeral=True)
-            return
+        if role in interaction.user.roles:
+            msg = (settings["verify_already_message"] or "✅ You're already verified!")
+            return await interaction.response.send_message(msg, ephemeral=True)
 
         try:
-            await member.add_roles(role, reason="Self-verified via verify button")
-            success_msg = (settings["verify_success_message"] or "✅ You've been verified!") if settings else "✅ You've been verified!"
-            await interaction.response.send_message(success_msg, ephemeral=True)
+            await interaction.user.add_roles(role)
+            msg = (settings["verify_success_message"] or "✅ You've been verified!")
+            await interaction.response.send_message(msg, ephemeral=True)
         except discord.Forbidden:
-            await interaction.response.send_message(
-                "⚠️ I don't have permission to assign that role. Make sure my role is above the verify role.",
-                ephemeral=True,
-            )
-
+            await interaction.response.send_message("⚠️ I need higher permissions to assign this role.", ephemeral=True)
 
 class VerifyView(discord.ui.View):
-    def __init__(self, button_label: str = "", button_emoji: discord.PartialEmoji | str | None = None):
+    def __init__(self, button_label: str = "Verify", button_emoji=None):
         super().__init__(timeout=None)
         self.add_item(VerifyButton(label=button_label, emoji=button_emoji))
-
-
-def parse_emoji(raw: str | None) -> discord.PartialEmoji | str | None:
-    """Parse a custom emoji string like <:name:id> or <a:name:id> into a PartialEmoji, or return as-is for unicode."""
-    if not raw:
-        return None
-    raw = raw.strip()
-    import re
-    m = re.match(r"<(a?):(\w+):(\d+)>", raw)
-    if m:
-        animated = bool(m.group(1))
-        name = m.group(2)
-        emoji_id = int(m.group(3))
-        return discord.PartialEmoji(name=name, id=emoji_id, animated=animated)
-    return raw  # unicode emoji or plain text fallback
-
-
-@bot.tree.command(name="verify_setup", description="Post a verify embed with a button that auto-assigns a role")
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(
-    role="Role to assign when someone clicks verify",
-    channel="Channel to post the verify embed in (defaults to current channel)",
-    button_label="Text on the verify button (leave blank for no text)",
-    button_emoji="Emoji for the button — paste the emoji directly e.g. <:pinkcheckmark:123456789>",
-    title="Embed title (default: verify !)",
-    description="Embed description text — supports newlines with \\n",
-    color="Theme name or hex color (default: pink)",
-    image="Big image URL shown at the bottom of the embed",
-    thumbnail="Small image URL shown in the top right corner",
-    success_message="Message shown to the user after they verify (default: ✅ You've been verified!)",
-    already_verified_message="Message shown if they're already verified (default: ✅ You're already verified!)",
-)
-async def verify_setup(
-    interaction: discord.Interaction,
-    role: discord.Role,
-    channel: discord.TextChannel | None = None,
-    button_label: str = "",
-    button_emoji: str | None = None,
-    title: str = "verify !",
-    description: str = "ξ θe account must be 30 days old to verify\nξ θe no vpns work when verifying\nξ θe must read rules before verifying\nξ θe click ✔ below to verify",
-    color: str = "pink",
-    image: str | None = None,
-    thumbnail: str | None = None,
-    success_message: str = "✅ You've been verified!",
-    already_verified_message: str = "✅ You're already verified!",
-):
-    guild = guild_only(interaction)
-    target = channel or interaction.channel
-
-    embed = build_embed(
-        title=title,
-        description=description.replace("\\n", "\n"),
-        theme=color,
-        image=image,
-        thumbnail=thumbnail,
-    )
-
-    parsed_emoji = parse_emoji(button_emoji)
-    await interaction.response.defer(ephemeral=True)
-    msg = await target.send(embed=embed, view=VerifyView(button_label=button_label, button_emoji=parsed_emoji))
-
-    upsert_settings(
-        guild.id,
-        verify_role_id=role.id,
-        verify_message_id=msg.id,
-        verify_channel_id=target.id,
-        verify_button_label=button_label,
-        verify_button_emoji=button_emoji or "",
-        verify_title=title,
-        verify_description=description,
-        verify_color=color,
-        verify_image_url=image or "",
-        verify_thumbnail_url=thumbnail or "",
-        verify_success_message=success_message,
-        verify_already_message=already_verified_message,
-    )
-
-    await interaction.followup.send(
-        f"✅ Verify embed posted in {target.mention}! Role **{role.name}** will be assigned on click.", ephemeral=True
-    )
-
 
 @bot.tree.command(name="verify_edit", description="Edit the verify embed — deletes the old one and reposts with your changes")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
     role="Role to assign on verify (leave blank to keep current)",
-    channel="Channel to repost in (leave blank to keep current channel)",
+    channel="Channel to repost in (leave blank to keep current)",
     button_label="Text on the verify button (leave blank to keep current)",
     button_emoji="Emoji for the button (leave blank to keep current)",
     title="Embed title (leave blank to keep current)",
@@ -980,90 +883,84 @@ async def verify_setup(
     description="Embed description — supports \\n for newlines (leave blank to keep current)",
     color="Theme name or hex color (leave blank to keep current)",
     image="Big image URL (leave blank to keep current)",
+    clear_image="Set to True to remove the big image",
     thumbnail="Small image URL top right (leave blank to keep current)",
+    clear_thumbnail="Set to True to remove the thumbnail",
     success_message="Message shown after verifying (leave blank to keep current)",
-    already_verified_message="Message shown if already verified (leave blank to keep current)",
+    already_verified_message="Message shown if already verified (leave blank to keep current)"
 )
 async def verify_edit(
     interaction: discord.Interaction,
-    role: discord.Role | None = None,
-    channel: discord.TextChannel | None = None,
-    button_label: str | None = None,
-    button_emoji: str | None = None,
-    title: str | None = None,
+    role: discord.Role = None,
+    channel: discord.TextChannel = None,
+    button_label: str = None,
+    button_emoji: str = None,
+    title: str = None,
     clear_title: bool = False,
-    description: str | None = None,
-    color: str | None = None,
-    image: str | None = None,
-    thumbnail: str | None = None,
-    success_message: str | None = None,
-    already_verified_message: str | None = None,
+    description: str = None,
+    color: str = None,
+    image: str = None,
+    clear_image: bool = False,
+    thumbnail: str = None,
+    clear_thumbnail: bool = False,
+    success_message: str = None,
+    already_verified_message: str = None
 ):
-    guild = guild_only(interaction)
-    settings = get_settings(guild.id)
+    guild = interaction.guild
+    updates = {}
+    
+    # Standard Updates
+    if role: updates["verify_role_id"] = str(role.id)
+    if channel: updates["verify_channel_id"] = channel.id
+    if button_label is not None: updates["verify_button_label"] = button_label
+    if button_emoji is not None: updates["verify_button_emoji"] = button_emoji
+    if description is not None: updates["verify_description"] = description
+    if color is not None: updates["verify_color"] = color
+    if success_message is not None: updates["verify_success_message"] = success_message
+    if already_verified_message is not None: updates["verify_already_message"] = already_verified_message
 
-    if not settings or not settings["verify_channel_id"]:
-        await interaction.response.send_message("No verify embed set up yet. Run `/verify_setup` first.", ephemeral=True)
-        return
+    # Clear Logic (To remove fields like title or images)
+    if clear_title: updates["verify_title"] = "" 
+    elif title is not None: updates["verify_title"] = title
 
+    if clear_image: updates["verify_image_url"] = ""
+    elif image is not None: updates["verify_image_url"] = image
+
+    if clear_thumbnail: updates["verify_thumbnail_url"] = ""
+    elif thumbnail is not None: updates["verify_thumbnail_url"] = thumbnail
+
+    upsert_settings(guild.id, **updates)
+    row = get_settings(guild.id)
+    
+    embed = build_embed(
+        title=row["verify_title"] if row["verify_title"] else None,
+        description=(row["verify_description"] or "Click the button below to verify!").replace("\\n", "\n"),
+        theme=row["verify_color"] or "pink",
+        image=row["verify_image_url"] if row["verify_image_url"] else None,
+        thumbnail=row["verify_thumbnail_url"] if row["verify_thumbnail_url"] else None
+    )
+    
+    view = VerifyView(
+        button_label=row["verify_button_label"],
+        button_emoji=parse_emoji(row["verify_button_emoji"])
+    )
+
+    target_channel_id = row["verify_channel_id"] or interaction.channel.id
+    target_channel = guild.get_channel(int(target_channel_id))
+    
     await interaction.response.defer(ephemeral=True)
 
-    # delete old message
-    old_channel_id = settings["verify_channel_id"]
-    old_message_id = settings["verify_message_id"]
-    if old_channel_id and old_message_id:
-        old_ch = guild.get_channel(int(old_channel_id))
-        if old_ch:
-            try:
-                old_msg = await old_ch.fetch_message(int(old_message_id))
-                await old_msg.delete()
-            except Exception:
-                pass
+    if row["verify_message_id"]:
+        try:
+            old_msg = await target_channel.fetch_message(int(row["verify_message_id"]))
+            await old_msg.delete()
+        except:
+            pass
 
-    # merge new values with saved ones
-    final_role_id     = role.id if role else int(settings["verify_role_id"])
-    final_channel     = channel or guild.get_channel(int(old_channel_id))
-    final_label       = button_label if button_label is not None else (settings["verify_button_label"] or "")
-    final_emoji_raw   = button_emoji if button_emoji is not None else (settings["verify_button_emoji"] or None)
-    final_title       = None if clear_title else (title or settings["verify_title"] or "verify !")
-    final_description = description or settings["verify_description"] or ""
-    final_color       = color or settings["verify_color"] or "pink"
-    final_image       = image if image is not None else (settings["verify_image_url"] or None)
-    final_thumbnail   = thumbnail if thumbnail is not None else (settings["verify_thumbnail_url"] or None)
-    final_success     = success_message if success_message is not None else (settings["verify_success_message"] or "✅ You've been verified!")
-    final_already     = already_verified_message if already_verified_message is not None else (settings["verify_already_message"] or "✅ You're already verified!")
+    new_msg = await target_channel.send(embed=embed, view=view)
+    upsert_settings(guild.id, verify_message_id=str(new_msg.id))
 
-    embed = build_embed(
-        title=final_title,
-        description=final_description.replace("\\n", "\n"),
-        theme=final_color,
-        image=final_image or None,
-        thumbnail=final_thumbnail or None,
-    )
-
-    parsed_emoji = parse_emoji(final_emoji_raw)
-    msg = await final_channel.send(embed=embed, view=VerifyView(button_label=final_label, button_emoji=parsed_emoji))
-
-    upsert_settings(
-        guild.id,
-        verify_role_id=final_role_id,
-        verify_message_id=msg.id,
-        verify_channel_id=final_channel.id,
-        verify_button_label=final_label,
-        verify_button_emoji=final_emoji_raw or "",
-        verify_title=final_title,
-        verify_description=final_description,
-        verify_color=final_color,
-        verify_image_url=final_image or "",
-        verify_thumbnail_url=final_thumbnail or "",
-        verify_success_message=final_success,
-        verify_already_message=final_already,
-    )
-
-    await interaction.followup.send(
-        f"✅ Verify embed updated in {final_channel.mention}!", ephemeral=True
-    )
-
+    await interaction.followup.send(f"✅ Verification updated in {target_channel.mention}!", ephemeral=True)
 
 # ———————————————––
 
