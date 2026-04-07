@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
-# ———————————————––
+# ———————————————––verify
 
 # Setup
 
@@ -235,11 +235,26 @@ def get_settings(guild_id: int) -> sqlite3.Row | None:
     return row
 
 
-def parse_emoji(emoji_str: str | None):
-    if not emoji_str:
+def clean_input(value):
+    if value is None:
         return None
-    return emoji_str.strip()
+    if isinstance(value, str) and value.lower() == "none":
+        return ""
+    return value
 
+
+def parse_button(button: str | None):
+    if not button:
+        return None, None
+
+    parts = button.split(" ", 1)
+
+    # If first part looks like emoji
+    if len(parts) > 1 and len(parts[0]) <= 3:
+        return parts[1], parts[0]
+
+    return button, None
+    
 
 # ———————————————––
 
@@ -1117,61 +1132,54 @@ class VerifyView(discord.ui.View):
         self.add_item(VerifyButton(label=button_label, emoji=button_emoji))
 
 
-@bot.tree.command(name="verify_edit", description="Edit the verify embed — deletes the old one and reposts with your changes")
+@bot.tree.command(name="verify_message", description="Create or edit the verify embed")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
-    role="Role to assign on verify (leave blank to keep current)",
-    channel="Channel to repost in (leave blank to keep current)",
-    button_label="Text on the verify button (leave blank to keep current)",
-    button_emoji="Emoji for the button (leave blank to keep current)",
-    title="Embed title (leave blank to keep current)",
-    clear_title="Set to True to remove the title entirely",
-    description="Embed description — supports \\n for newlines (leave blank to keep current)",
-    color="Theme name or hex color (leave blank to keep current)",
-    image="Big image URL (leave blank to keep current)",
-    clear_image="Set to True to remove the big image",
-    thumbnail="Small image URL top right (leave blank to keep current)",
-    clear_thumbnail="Set to True to remove the thumbnail",
-    success_message="Message shown after verifying (leave blank to keep current)",
-    already_verified_message="Message shown if already verified (leave blank to keep current)",
+    title="Embed title (use 'none' to remove)",
+    description="Embed description",
+    color="Theme name or hex",
+    image="Big image URL (use 'none' to remove)",
+    thumbnail="Small image URL (use 'none' to remove)",
+    button="Button text + optional emoji (e.g. 💖 verify)"
 )
-async def verify_edit(
+async def verify_message(
     interaction: discord.Interaction,
-    role: discord.Role = None,
-    channel: discord.TextChannel = None,
-    button_label: str = None,
-    button_emoji: str = None,
-    title: str = None,
-    clear_title: bool = False,
-    description: str = None,
-    color: str = None,
-    image: str = None,
-    clear_image: bool = False,
-    thumbnail: str = None,
-    clear_thumbnail: bool = False,
-    success_message: str = None,
-    already_verified_message: str = None,
+    title: str | None = None,
+    description: str | None = None,
+    color: str | None = None,
+    image: str | None = None,
+    thumbnail: str | None = None,
+    button: str | None = None,
 ):
     guild = interaction.guild
+
     updates = {}
 
-    if role: updates["verify_role_id"] = str(role.id)
-    if channel: updates["verify_channel_id"] = channel.id
-    if button_label is not None: updates["verify_button_label"] = button_label
-    if button_emoji is not None: updates["verify_button_emoji"] = button_emoji
-    if description is not None: updates["verify_description"] = description
-    if color is not None: updates["verify_color"] = color
-    if success_message is not None: updates["verify_success_message"] = success_message
-    if already_verified_message is not None: updates["verify_already_message"] = already_verified_message
+    # Clean inputs
+    title = clean_input(title)
+    image = clean_input(image)
+    thumbnail = clean_input(thumbnail)
 
-    if clear_title: updates["verify_title"] = ""
-    elif title is not None: updates["verify_title"] = title
+    if title is not None:
+        updates["verify_title"] = title
 
-    if clear_image: updates["verify_image_url"] = ""
-    elif image is not None: updates["verify_image_url"] = image
+    if description is not None:
+        updates["verify_description"] = description
 
-    if clear_thumbnail: updates["verify_thumbnail_url"] = ""
-    elif thumbnail is not None: updates["verify_thumbnail_url"] = thumbnail
+    if color is not None:
+        updates["verify_color"] = color
+
+    if image is not None:
+        updates["verify_image_url"] = image
+
+    if thumbnail is not None:
+        updates["verify_thumbnail_url"] = thumbnail
+
+    # Button parsing
+    if button is not None:
+        label, emoji = parse_button(button)
+        updates["verify_button_label"] = label
+        updates["verify_button_emoji"] = emoji
 
     upsert_settings(guild.id, **updates)
     row = get_settings(guild.id)
@@ -1186,25 +1194,81 @@ async def verify_edit(
 
     view = VerifyView(
         button_label=row["verify_button_label"],
-        button_emoji=parse_emoji(row["verify_button_emoji"]),
+        button_emoji=parse_emoji(row["verify_button_emoji"])
     )
 
-    target_channel_id = row["verify_channel_id"] or interaction.channel.id
-    target_channel = guild.get_channel(int(target_channel_id))
+    channel_id = row["verify_channel_id"] or interaction.channel.id
+    channel = guild.get_channel(int(channel_id))
 
     await interaction.response.defer(ephemeral=True)
 
+    # delete old message
     if row["verify_message_id"]:
         try:
-            old_msg = await target_channel.fetch_message(int(row["verify_message_id"]))
+            old_msg = await channel.fetch_message(int(row["verify_message_id"]))
             await old_msg.delete()
-        except Exception:
+        except:
             pass
 
-    new_msg = await target_channel.send(embed=embed, view=view)
+    new_msg = await channel.send(embed=embed, view=view)
     upsert_settings(guild.id, verify_message_id=str(new_msg.id))
 
-    await interaction.followup.send(f"✅ Verification updated in {target_channel.mention}!", ephemeral=True)
+    await interaction.followup.send(f"✅ Verify message updated in {channel.mention}", ephemeral=True)
+
+
+@bot.tree.command(name="verify_settings", description="Set verify role and channel")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    role="Role to give when verified",
+    channel="Channel to send the verify message"
+)
+async def verify_settings(
+    interaction: discord.Interaction,
+    role: discord.Role,
+    channel: discord.TextChannel
+):
+    guild = interaction.guild
+
+    upsert_settings(
+        guild.id,
+        verify_role_id=str(role.id),
+        verify_channel_id=channel.id
+    )
+
+    await interaction.response.send_message(
+        f"✅ Verify setup updated\nRole: {role.mention}\nChannel: {channel.mention}",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="verify_responses", description="Set verify response messages")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    success_message="Message after verifying",
+    already_verified_message="Message if already verified"
+)
+async def verify_responses(
+    interaction: discord.Interaction,
+    success_message: str | None = None,
+    already_verified_message: str | None = None,
+):
+    guild = interaction.guild
+
+    updates = {}
+
+    if success_message is not None:
+        updates["verify_success_message"] = success_message
+
+    if already_verified_message is not None:
+        updates["verify_already_message"] = already_verified_message
+
+    if not updates:
+        await interaction.response.send_message("Provide at least one field.", ephemeral=True)
+        return
+
+    upsert_settings(guild.id, **updates)
+
+    await interaction.response.send_message("✅ Verify responses updated!", ephemeral=True)
 
 
 # ———————————————––
