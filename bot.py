@@ -277,13 +277,15 @@ def get_waitlist_key(guild_id: int):
     return str(guild_id)
 
 
-def build_waitlist_embed(guild: discord.Guild, title: str, user_ids: list[str]) -> discord.Embed:
+def build_waitlist_embed(guild: discord.Guild, title: str, channel_ids: list[str]) -> discord.Embed:
     lines = []
 
-    for i, user_id in enumerate(user_ids, start=1):
-        lines.append(f"{i}) <@{user_id}>")
+    for channel_id in channel_ids:
+        channel = guild.get_channel(int(channel_id))
+        if channel:
+            lines.append(f"# {channel.name}")
 
-    description = "\n".join(lines) if lines else "*No one is on the waitlist yet.*"
+    description = "\n".join(lines) if lines else "*No orders in the waitlist yet.*"
 
     embed = discord.Embed(
         title=title,
@@ -1531,9 +1533,9 @@ async def waitlist_create(interaction: discord.Interaction):
     save_waitlists(data)
 
 
-@bot.tree.command(name="waitlist_add", description="Add user to waitlist")
-@app_commands.describe(user="User to add")
-async def waitlist_add(interaction: discord.Interaction, user: discord.Member):
+@bot.tree.command(name="waitlist_add", description="Add channel to waitlist")
+@app_commands.describe(channel="Order channel to add")
+async def waitlist_add(interaction: discord.Interaction, channel: discord.TextChannel):
     data = load_waitlists()
     key = get_waitlist_key(interaction.guild.id)
 
@@ -1541,22 +1543,22 @@ async def waitlist_add(interaction: discord.Interaction, user: discord.Member):
         await interaction.response.send_message("Run /waitlist_create first.", ephemeral=True)
         return
 
-    uid = str(user.id)
+    cid = str(channel.id)
 
-    if uid in data[key]["users"]:
-        await interaction.response.send_message("Already in waitlist.", ephemeral=True)
+    if cid in data[key]["users"]:
+        await interaction.response.send_message("That channel is already in the waitlist.", ephemeral=True)
         return
 
-    data[key]["users"].append(uid)
+    data[key]["users"].append(cid)
     save_waitlists(data)
 
     await update_waitlist_message(bot, interaction.guild.id)
-    await interaction.response.send_message(f"Added {user.mention}", ephemeral=True)
+    await interaction.response.send_message(f"Added {channel.mention}", ephemeral=True)
 
 
-@bot.tree.command(name="waitlist_remove", description="Remove user from waitlist")
-@app_commands.describe(user="User to remove")
-async def waitlist_remove(interaction: discord.Interaction, user: discord.Member):
+@bot.tree.command(name="waitlist_remove", description="Remove channel from waitlist")
+@app_commands.describe(channel="Order channel to remove")
+async def waitlist_remove(interaction: discord.Interaction, channel: discord.TextChannel):
     data = load_waitlists()
     key = get_waitlist_key(interaction.guild.id)
 
@@ -1564,34 +1566,18 @@ async def waitlist_remove(interaction: discord.Interaction, user: discord.Member
         await interaction.response.send_message("Run /waitlist_create first.", ephemeral=True)
         return
 
-    uid = str(user.id)
+    cid = str(channel.id)
 
-    if uid not in data[key]["users"]:
-        await interaction.response.send_message("Not in waitlist.", ephemeral=True)
+    if cid not in data[key]["users"]:
+        await interaction.response.send_message("That channel is not in the waitlist.", ephemeral=True)
         return
 
-    data[key]["users"].remove(uid)
+    data[key]["users"].remove(cid)
     save_waitlists(data)
 
     await update_waitlist_message(bot, interaction.guild.id)
-    await interaction.response.send_message(f"Removed {user.mention}", ephemeral=True)
-
-
-@bot.tree.command(name="waitlist_clear", description="Clear waitlist")
-async def waitlist_clear(interaction: discord.Interaction):
-    data = load_waitlists()
-    key = get_waitlist_key(interaction.guild.id)
-
-    if key not in data:
-        await interaction.response.send_message("Run /waitlist_create first.", ephemeral=True)
-        return
-
-    data[key]["users"] = []
-    save_waitlists(data)
-
-    await update_waitlist_message(bot, interaction.guild.id)
-    await interaction.response.send_message("Cleared waitlist.", ephemeral=True)
-
+    await interaction.response.send_message(f"Removed {channel.mention}", ephemeral=True)
+    
 
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable is not set")
