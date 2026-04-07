@@ -288,7 +288,7 @@ def build_waitlist_embed(
     for i, channel_id in enumerate(channel_ids, start=1):
         channel = guild.get_channel(int(channel_id))
         if channel:
-            lines.append(f"{i}) #{channel.name}")
+            lines.append(f"{i}) <#{channel.id}>")
 
     description = "\n".join(lines) if lines else "*No orders in the waitlist yet.*"
 
