@@ -1500,12 +1500,6 @@ async def autoresponder_list(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN environment variable is not set")
-
-bot.run(TOKEN)
-
-
 # ———————————————––
 # Commands — Waitlist
 # ———————————————––
@@ -1598,3 +1592,8 @@ async def waitlist_clear(interaction: discord.Interaction):
     await update_waitlist_message(bot, interaction.guild.id)
     await interaction.response.send_message("Cleared waitlist.", ephemeral=True)
 
+
+if not TOKEN:
+    raise RuntimeError("DISCORD_TOKEN environment variable is not set")
+
+bot.run(TOKEN)
