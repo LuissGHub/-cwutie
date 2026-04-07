@@ -277,20 +277,25 @@ def get_waitlist_key(guild_id: int):
     return str(guild_id)
 
 
-def build_waitlist_embed(guild: discord.Guild, title: str, channel_ids: list[str]) -> discord.Embed:
+def build_waitlist_embed(
+    guild: discord.Guild,
+    title: str,
+    channel_ids: list[str],
+    color: str = "pink",
+) -> discord.Embed:
     lines = []
 
-    for channel_id in channel_ids:
+    for i, channel_id in enumerate(channel_ids, start=1):
         channel = guild.get_channel(int(channel_id))
         if channel:
-            lines.append(f"# {channel.name}")
+            lines.append(f"{i}) #{channel.name}")
 
     description = "\n".join(lines) if lines else "*No orders in the waitlist yet.*"
 
     embed = discord.Embed(
         title=title,
         description=description,
-        color=0xF7EFCB
+        color=get_theme_color(color),
     )
     return embed
 
@@ -316,7 +321,12 @@ async def update_waitlist_message(bot, guild_id: int):
     except discord.NotFound:
         return
 
-    embed = build_waitlist_embed(guild, entry["title"], entry["users"])
+    embed = build_waitlist_embed(
+        guild,
+        entry["title"],
+        entry["users"],
+        entry.get("color", "pink"),
+    )
     await message.edit(embed=embed)
 
 
@@ -1509,7 +1519,15 @@ async def autoresponder_list(interaction: discord.Interaction):
 
 @bot.tree.command(name="waitlist_create", description="Create a waitlist")
 @app_commands.checks.has_permissions(manage_guild=True)
-async def waitlist_create(interaction: discord.Interaction):
+@app_commands.describe(
+    title="Waitlist title",
+    color="Theme name or hex like pink or #f7cfe3",
+)
+async def waitlist_create(
+    interaction: discord.Interaction,
+    title: str | None = None,
+    color: str = "pink",
+):
     if interaction.guild is None:
         await interaction.response.send_message("Server only.", ephemeral=True)
         return
@@ -1517,14 +1535,15 @@ async def waitlist_create(interaction: discord.Interaction):
     data = load_waitlists()
     key = get_waitlist_key(interaction.guild.id)
 
-    title = f"{interaction.guild.name}'s waitlist"
+    final_title = title or f"{interaction.guild.name}'s waitlist"
 
-    embed = build_waitlist_embed(interaction.guild, title, [])
+    embed = build_waitlist_embed(interaction.guild, final_title, [], color)
     await interaction.response.send_message("✅ Waitlist created!", ephemeral=True)
     msg = await interaction.channel.send(embed=embed)
 
     data[key] = {
-        "title": title,
+        "title": final_title,
+        "color": color,
         "channel_id": interaction.channel.id,
         "message_id": msg.id,
         "users": []
