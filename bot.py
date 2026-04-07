@@ -281,7 +281,7 @@ def build_waitlist_embed(guild: discord.Guild, title: str, user_ids: list[str]) 
     lines = []
 
     for i, user_id in enumerate(user_ids, start=1):
-        lines.append(f"`({i})` <@{user_id}>")
+        lines.append(f"{i}) <@{user_id}>")
 
     description = "\n".join(lines) if lines else "*No one is on the waitlist yet.*"
 
