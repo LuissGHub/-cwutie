@@ -53,6 +53,12 @@ def init_db() -> None:
             welcome_banner_url TEXT,
             welcome_theme TEXT DEFAULT 'pink',
             welcome_text TEXT
+            boost_channel_id INTEGER,
+            boost_text TEXT,
+            boost_title TEXT,
+            boost_color TEXT,
+            boost_image_url TEXT,
+            boost_thumbnail_url TEXT
         )
         """
     )
@@ -61,7 +67,9 @@ def init_db() -> None:
                 "verify_message_id", "verify_channel_id", "verify_button_label",
                 "verify_button_emoji", "verify_title", "verify_description",
                 "verify_color", "verify_image_url", "verify_thumbnail_url",
-                "verify_success_message", "verify_already_message"]:
+                "verify_success_message", "verify_already_message"
+                "boost_channel_id", "boost_text", "boost_title", "boost_color",
+                "boost_image_url", "boost_thumbnail_url"]:
         try:
             cur.execute(f"ALTER TABLE settings ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
@@ -138,6 +146,12 @@ def upsert_settings(guild_id: int, **kwargs) -> None:
         "verify_thumbnail_url",
         "verify_success_message",
         "verify_already_message",
+        "boost_channel_id",
+        "boost_text",
+        "boost_title",
+        "boost_color",
+        "boost_image_url",
+        "boost_thumbnail_url",
     }
     updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not updates:
@@ -483,6 +497,36 @@ async def on_member_join(member: discord.Member):
 
 
 @bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    # detect a NEW boost
+    if before.premium_since is None and after.premium_since is not None:
+        settings = get_settings(after.guild.id)
+        if not settings or not settings["boost_channel_id"]:
+            return
+
+        channel = after.guild.get_channel(int(settings["boost_channel_id"]))
+        if channel is None:
+            return
+
+        text = (settings["boost_text"] or "boost {mention} ♡\nwe greatly appreciate all boosts!").replace(
+            "{mention}", after.mention
+        )
+        text = text.replace("{username}", after.name)
+        text = text.replace("{server}", after.guild.name)
+
+        embed = build_embed(
+            title=settings["boost_title"] or None,
+            description=text,
+            theme=settings["boost_color"] or "pink",
+            image=settings["boost_image_url"] or None,
+            thumbnail=settings["boost_thumbnail_url"] or None,
+            user_avatar_url=after.display_avatar.url if not settings["boost_thumbnail_url"] else None,
+        )
+
+        await channel.send(embed=embed)
+
+
+@bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
@@ -825,6 +869,97 @@ async def themes(interaction: discord.Interaction):
         f"**Embed colors:** {names}\nOr use any hex like `#f7cfe3`",
         ephemeral=True,
     )
+
+
+# ———————————————––
+# Commands — Boost
+# ———————————————––
+
+
+@bot.tree.command(name="set_boost_channel", description="Set the channel for boost announcements")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(channel="Channel where boost messages will be sent")
+async def set_boost_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, boost_channel_id=channel.id)
+    await interaction.response.send_message(
+        f"✅ Boost announcements will go to {channel.mention}!",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="set_boost_message", description="Set the text for boost announcements")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    message="Use {mention}, {username}, and {server}"
+)
+async def set_boost_message(interaction: discord.Interaction, message: str):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, boost_text=message.replace("\\n", "\n"))
+    await interaction.response.send_message("✅ Boost message saved!", ephemeral=True)
+
+
+@bot.tree.command(name="set_boost_style", description="Set title, color, image, and thumbnail for boost embeds")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    title="Embed title",
+    color="Theme name or hex like pink or #f7cfe3",
+    image="Big image URL at the bottom",
+    thumbnail="Small image URL at top-right"
+)
+async def set_boost_style(
+    interaction: discord.Interaction,
+    title: str | None = None,
+    color: str | None = None,
+    image: str | None = None,
+    thumbnail: str | None = None,
+):
+    guild = guild_only(interaction)
+    updates = {}
+
+    if title is not None:
+        updates["boost_title"] = title
+    if color is not None:
+        updates["boost_color"] = color
+    if image is not None:
+        updates["boost_image_url"] = image
+    if thumbnail is not None:
+        updates["boost_thumbnail_url"] = thumbnail
+
+    if not updates:
+        await interaction.response.send_message("Please provide at least one field to update.", ephemeral=True)
+        return
+
+    upsert_settings(guild.id, **updates)
+    await interaction.response.send_message("✅ Boost embed style updated!", ephemeral=True)
+
+
+@bot.tree.command(name="test_boost", description="Preview the boost message")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def test_boost(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    settings = get_settings(guild.id)
+
+    if not settings or not settings["boost_channel_id"]:
+        await interaction.response.send_message("Run `/set_boost_channel` first.", ephemeral=True)
+        return
+
+    text = (settings["boost_text"] or "boost {mention} ♡\nwe greatly appreciate all boosts!").replace(
+        "{mention}", interaction.user.mention
+    )
+    text = text.replace("{username}", interaction.user.name)
+    text = text.replace("{server}", guild.name)
+
+    embed = build_embed(
+        title=settings["boost_title"] or None,
+        description=text,
+        theme=settings["boost_color"] or "pink",
+        image=settings["boost_image_url"] or None,
+        thumbnail=settings["boost_thumbnail_url"] or None,
+        user_avatar_url=interaction.user.display_avatar.url if not settings["boost_thumbnail_url"] else None,
+    )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ———————————————––
