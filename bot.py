@@ -663,7 +663,7 @@ async def on_member_join(member: discord.Member):
     channel = member.guild.get_channel(settings["welcome_channel_id"])
     if channel is None:
         return
-    description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", member.mention)
+    description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", member.mention).replace("\\n", "\n")
     embed = build_embed(
         title=None,
         description=description,
