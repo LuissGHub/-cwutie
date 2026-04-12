@@ -1551,6 +1551,51 @@ async def waitlist_create(
 
     save_waitlists(data)
 
+class WaitlistRemoveView(discord.ui.View):
+    def __init__(self, guild: discord.Guild, entries: list[str]):
+        super().__init__(timeout=60)
+        options = []
+        for cid in entries:
+            channel = guild.get_channel(int(cid))
+            label = f"#{channel.name}" if channel else f"unknown ({cid})"
+            options.append(discord.SelectOption(label=label, value=cid))
+        self.add_item(WaitlistRemoveSelect(options))
+
+
+class WaitlistRemoveSelect(discord.ui.Select):
+    def __init__(self, options):
+        super().__init__(placeholder="Pick a channel to remove...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        data = load_waitlists()
+        key = get_waitlist_key(interaction.guild.id)
+
+        cid = self.values[0]
+        if cid in data[key]["users"]:
+            data[key]["users"].remove(cid)
+            save_waitlists(data)
+            await update_waitlist_message(bot, interaction.guild.id)
+            await interaction.response.edit_message(
+                content=f"✅ Removed `{cid}` from the waitlist.", view=None
+            )
+        else:
+            await interaction.response.edit_message(
+                content="❌ That entry wasn't found.", view=None
+            )
+
+
+@bot.tree.command(name="waitlist_remove", description="Remove a channel from the waitlist")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def waitlist_remove(interaction: discord.Interaction):
+    data = load_waitlists()
+    key = get_waitlist_key(interaction.guild.id)
+
+    if key not in data or not data[key]["users"]:
+        await interaction.response.send_message("The waitlist is empty.", ephemeral=True)
+        return
+
+    view = WaitlistRemoveView(interaction.guild, data[key]["users"])
+    await interaction.response.send_message("Select a channel to remove:", view=view, ephemeral=True)
 
 @bot.tree.command(name="waitlist_add", description="Add channel to waitlist")
 @app_commands.describe(channel="Order channel to add")
@@ -1573,29 +1618,6 @@ async def waitlist_add(interaction: discord.Interaction, channel: discord.TextCh
 
     await update_waitlist_message(bot, interaction.guild.id)
     await interaction.response.send_message(f"Added {channel.mention}", ephemeral=True)
-
-
-@bot.tree.command(name="waitlist_remove", description="Remove channel from waitlist")
-@app_commands.describe(channel="Order channel to remove")
-async def waitlist_remove(interaction: discord.Interaction, channel: discord.TextChannel):
-    data = load_waitlists()
-    key = get_waitlist_key(interaction.guild.id)
-
-    if key not in data:
-        await interaction.response.send_message("Run /waitlist_create first.", ephemeral=True)
-        return
-
-    cid = str(channel.id)
-
-    if cid not in data[key]["users"]:
-        await interaction.response.send_message("That channel is not in the waitlist.", ephemeral=True)
-        return
-
-    data[key]["users"].remove(cid)
-    save_waitlists(data)
-
-    await update_waitlist_message(bot, interaction.guild.id)
-    await interaction.response.send_message(f"Removed {channel.mention}", ephemeral=True)
     
 
 if not TOKEN:
