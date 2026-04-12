@@ -255,7 +255,7 @@ def parse_button(button: str | None):
         return parts[1], parts[0]
 
     return button, None
-    
+
 
 WAITLIST_FILE = "waitlists.json"
 
@@ -532,7 +532,7 @@ class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
 
         preview = build_embed(
             title=None,
-            description=str(self.welcome_text).replace("{mention}", interaction.user.mention),
+            description=str(self.welcome_text).replace("{mention}", interaction.user.display_name),
             theme=str(self.theme) or "pink",
             image=str(self.banner_url) or None,
             thumbnail=None,
@@ -632,6 +632,92 @@ class BoostEditModal(discord.ui.Modal, title="Edit Boost Settings"):
 
 # ———————————————––
 
+# Verify Views
+
+# ———————————————––
+
+
+class VerifyButton(discord.ui.Button):
+    def __init__(self, label: str = "Verify", emoji=None):
+        super().__init__(
+            label=label or "Verify",
+            emoji=emoji,
+            style=discord.ButtonStyle.secondary,
+            custom_id="verify_button",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        settings = get_settings(guild.id)
+        role_id = settings["verify_role_id"] if settings else None
+
+        if not role_id:
+            return await interaction.response.send_message("⚠️ No verify role set.", ephemeral=True)
+
+        role = guild.get_role(int(role_id))
+        if not role:
+            return await interaction.response.send_message("⚠️ Verify role not found.", ephemeral=True)
+
+        if role in interaction.user.roles:
+            msg = (settings["verify_already_message"] or "✅ You're already verified!")
+            return await interaction.response.send_message(msg, ephemeral=True)
+
+        try:
+            await interaction.user.add_roles(role)
+            msg = (settings["verify_success_message"] or "✅ You've been verified!")
+            await interaction.response.send_message(msg, ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("⚠️ I need higher permissions to assign this role.", ephemeral=True)
+
+
+class VerifyView(discord.ui.View):
+    def __init__(self, button_label: str = "Verify", button_emoji=None):
+        super().__init__(timeout=None)
+        self.add_item(VerifyButton(label=button_label, emoji=button_emoji))
+
+
+# ———————————————––
+
+# Waitlist Views
+
+# ———————————————––
+
+
+class WaitlistRemoveSelect(discord.ui.Select):
+    def __init__(self, options):
+        super().__init__(placeholder="Pick a channel to remove...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        data = load_waitlists()
+        key = get_waitlist_key(interaction.guild.id)
+
+        cid = self.values[0]
+        if cid in data[key]["users"]:
+            data[key]["users"].remove(cid)
+            save_waitlists(data)
+            await update_waitlist_message(bot, interaction.guild.id)
+            await interaction.response.edit_message(
+                content=f"✅ Removed from the waitlist.", view=None
+            )
+        else:
+            await interaction.response.edit_message(
+                content="❌ That entry wasn't found.", view=None
+            )
+
+
+class WaitlistRemoveView(discord.ui.View):
+    def __init__(self, guild: discord.Guild, entries: list[str]):
+        super().__init__(timeout=60)
+        options = []
+        for cid in entries:
+            channel = guild.get_channel(int(cid))
+            label = f"#{channel.name}" if channel else f"unknown ({cid})"
+            options.append(discord.SelectOption(label=label, value=cid))
+        self.add_item(WaitlistRemoveSelect(options))
+
+
+# ———————————————––
+
 # Events
 
 # ———————————————––
@@ -663,7 +749,7 @@ async def on_member_join(member: discord.Member):
     channel = member.guild.get_channel(settings["welcome_channel_id"])
     if channel is None:
         return
-    description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", member.mention).replace("\\n", "\n")
+    description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", member.display_name).replace("\\n", "\n")
     embed = build_embed(
         title=None,
         description=description,
@@ -969,7 +1055,7 @@ async def welcome_setup(
     upsert_settings(guild.id, **kwargs)
     preview = build_embed(
         title=None,
-        description=welcome_text.replace("{mention}", interaction.user.mention),
+        description=welcome_text.replace("{mention}", interaction.user.display_name),
         theme=color,
         image=banner_url,
         thumbnail=None,
@@ -1010,7 +1096,7 @@ async def welcome_edit(
     updated = get_settings(guild.id)
     preview = build_embed(
         title=None,
-        description=(updated["welcome_text"] or "Welcome!").replace("{mention}", interaction.user.mention),
+        description=(updated["welcome_text"] or "Welcome!").replace("{mention}", interaction.user.display_name),
         theme=updated["welcome_theme"] or "pink",
         image=updated["welcome_banner_url"],
         thumbnail=None,
@@ -1027,7 +1113,7 @@ async def welcome_test(interaction: discord.Interaction):
     if not settings or not settings["welcome_channel_id"]:
         await interaction.response.send_message("Run `/welcome_setup` first.", ephemeral=True)
         return
-    description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", interaction.user.mention)
+    description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", interaction.user.display_name)
     embed = build_embed(
         title=None,
         description=description,
@@ -1162,48 +1248,9 @@ async def test_boost(interaction: discord.Interaction):
 
 # ———————————————––
 
-# Verify Button
+# Commands — Verify
 
 # ———————————————––
-
-
-class VerifyButton(discord.ui.Button):
-    def __init__(self, label: str = "Verify", emoji=None):
-        super().__init__(
-            label=label or "Verify",
-            emoji=emoji,
-            style=discord.ButtonStyle.secondary,
-            custom_id="verify_button",
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        settings = get_settings(guild.id)
-        role_id = settings["verify_role_id"] if settings else None
-
-        if not role_id:
-            return await interaction.response.send_message("⚠️ No verify role set.", ephemeral=True)
-
-        role = guild.get_role(int(role_id))
-        if not role:
-            return await interaction.response.send_message("⚠️ Verify role not found.", ephemeral=True)
-
-        if role in interaction.user.roles:
-            msg = (settings["verify_already_message"] or "✅ You're already verified!")
-            return await interaction.response.send_message(msg, ephemeral=True)
-
-        try:
-            await interaction.user.add_roles(role)
-            msg = (settings["verify_success_message"] or "✅ You've been verified!")
-            await interaction.response.send_message(msg, ephemeral=True)
-        except discord.Forbidden:
-            await interaction.response.send_message("⚠️ I need higher permissions to assign this role.", ephemeral=True)
-
-
-class VerifyView(discord.ui.View):
-    def __init__(self, button_label: str = "Verify", button_emoji=None):
-        super().__init__(timeout=None)
-        self.add_item(VerifyButton(label=button_label, emoji=button_emoji))
 
 
 @bot.tree.command(name="verify_message", description="Create or edit the verify embed")
@@ -1551,38 +1598,6 @@ async def waitlist_create(
 
     save_waitlists(data)
 
-class WaitlistRemoveView(discord.ui.View):
-    def __init__(self, guild: discord.Guild, entries: list[str]):
-        super().__init__(timeout=60)
-        options = []
-        for cid in entries:
-            channel = guild.get_channel(int(cid))
-            label = f"#{channel.name}" if channel else f"unknown ({cid})"
-            options.append(discord.SelectOption(label=label, value=cid))
-        self.add_item(WaitlistRemoveSelect(options))
-
-
-class WaitlistRemoveSelect(discord.ui.Select):
-    def __init__(self, options):
-        super().__init__(placeholder="Pick a channel to remove...", options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        data = load_waitlists()
-        key = get_waitlist_key(interaction.guild.id)
-
-        cid = self.values[0]
-        if cid in data[key]["users"]:
-            data[key]["users"].remove(cid)
-            save_waitlists(data)
-            await update_waitlist_message(bot, interaction.guild.id)
-            await interaction.response.edit_message(
-                content=f"✅ Removed `{cid}` from the waitlist.", view=None
-            )
-        else:
-            await interaction.response.edit_message(
-                content="❌ That entry wasn't found.", view=None
-            )
-
 
 @bot.tree.command(name="waitlist_remove", description="Remove a channel from the waitlist")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -1596,6 +1611,7 @@ async def waitlist_remove(interaction: discord.Interaction):
 
     view = WaitlistRemoveView(interaction.guild, data[key]["users"])
     await interaction.response.send_message("Select a channel to remove:", view=view, ephemeral=True)
+
 
 @bot.tree.command(name="waitlist_add", description="Add channel to waitlist")
 @app_commands.describe(channel="Order channel to add")
@@ -1618,7 +1634,7 @@ async def waitlist_add(interaction: discord.Interaction, channel: discord.TextCh
 
     await update_waitlist_message(bot, interaction.guild.id)
     await interaction.response.send_message(f"Added {channel.mention}", ephemeral=True)
-    
+
 
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable is not set")
