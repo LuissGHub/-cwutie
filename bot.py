@@ -247,13 +247,9 @@ def clean_input(value):
 def parse_button(button: str | None):
     if not button:
         return None, None
-
     parts = button.split(" ", 1)
-
-    # If first part looks like emoji
     if len(parts) > 1 and len(parts[0]) <= 3:
         return parts[1], parts[0]
-
     return button, None
 
 
@@ -284,14 +280,11 @@ def build_waitlist_embed(
     color: str = "pink",
 ) -> discord.Embed:
     lines = []
-
     for i, channel_id in enumerate(channel_ids, start=1):
         channel = guild.get_channel(int(channel_id))
         if channel:
             lines.append(f"{i}) <#{channel.id}>")
-
     description = "\n".join(lines) if lines else "*No orders in the waitlist yet.*"
-
     embed = discord.Embed(
         title=title,
         description=description,
@@ -303,24 +296,19 @@ def build_waitlist_embed(
 async def update_waitlist_message(bot, guild_id: int):
     data = load_waitlists()
     key = get_waitlist_key(guild_id)
-
     if key not in data:
         return
-
     entry = data[key]
     guild = bot.get_guild(guild_id)
     if guild is None:
         return
-
     channel = guild.get_channel(entry["channel_id"])
     if channel is None:
         return
-
     try:
         message = await channel.fetch_message(entry["message_id"])
     except discord.NotFound:
         return
-
     embed = build_waitlist_embed(
         guild,
         entry["title"],
@@ -442,35 +430,14 @@ class EmbedModal(discord.ui.Modal, title="Create Embed"):
                          embed_title=?, description=?, theme=?, image_url=?,
                          thumbnail_url=?, use_avatar=?, updated_at=?
                        WHERE guild_id=? AND name=?""",
-                    (
-                        title_val,
-                        desc_val,
-                        theme_val,
-                        image_val,
-                        thumb_val,
-                        int(self.use_avatar),
-                        now,
-                        guild_id,
-                        self.save_name,
-                    ),
+                    (title_val, desc_val, theme_val, image_val, thumb_val, int(self.use_avatar), now, guild_id, self.save_name),
                 )
             else:
                 cur.execute(
                     """INSERT INTO saved_embeds
                        (guild_id, name, embed_title, description, theme, image_url, thumbnail_url, use_avatar, created_at, updated_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        guild_id,
-                        self.save_name,
-                        title_val,
-                        desc_val,
-                        theme_val,
-                        image_val,
-                        thumb_val,
-                        int(self.use_avatar),
-                        now,
-                        now,
-                    ),
+                    (guild_id, self.save_name, title_val, desc_val, theme_val, image_val, thumb_val, int(self.use_avatar), now, now),
                 )
             conn.commit()
             conn.close()
@@ -532,7 +499,7 @@ class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
 
         preview = build_embed(
             title=None,
-            description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", member.mention).replace("\\n", "\n")
+            description=str(self.welcome_text).replace("{mention}", interaction.user.mention),
             theme=str(self.theme) or "pink",
             image=str(self.banner_url) or None,
             thumbnail=None,
@@ -690,14 +657,13 @@ class WaitlistRemoveSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         data = load_waitlists()
         key = get_waitlist_key(interaction.guild.id)
-
         cid = self.values[0]
         if cid in data[key]["users"]:
             data[key]["users"].remove(cid)
             save_waitlists(data)
             await update_waitlist_message(bot, interaction.guild.id)
             await interaction.response.edit_message(
-                content=f"✅ Removed from the waitlist.", view=None
+                content="✅ Removed from the waitlist.", view=None
             )
         else:
             await interaction.response.edit_message(
@@ -749,7 +715,7 @@ async def on_member_join(member: discord.Member):
     channel = member.guild.get_channel(settings["welcome_channel_id"])
     if channel is None:
         return
-    description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", member.display_name).replace("\\n", "\n")
+    description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", member.mention).replace("\\n", "\n")
     embed = build_embed(
         title=None,
         description=description,
@@ -1055,7 +1021,7 @@ async def welcome_setup(
     upsert_settings(guild.id, **kwargs)
     preview = build_embed(
         title=None,
-        description=welcome_text.replace("{mention}", interaction.user.display_name),
+        description=welcome_text.replace("{mention}", interaction.user.mention),
         theme=color,
         image=banner_url,
         thumbnail=None,
@@ -1096,7 +1062,7 @@ async def welcome_edit(
     updated = get_settings(guild.id)
     preview = build_embed(
         title=None,
-        description=(updated["welcome_text"] or "Welcome!").replace("{mention}", interaction.user.display_name),
+        description=(updated["welcome_text"] or "Welcome!").replace("{mention}", interaction.user.mention),
         theme=updated["welcome_theme"] or "pink",
         image=updated["welcome_banner_url"],
         thumbnail=None,
@@ -1113,7 +1079,7 @@ async def welcome_test(interaction: discord.Interaction):
     if not settings or not settings["welcome_channel_id"]:
         await interaction.response.send_message("Run `/welcome_setup` first.", ephemeral=True)
         return
-    description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", interaction.user.display_name)
+    description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", interaction.user.mention)
     embed = build_embed(
         title=None,
         description=description,
@@ -1273,30 +1239,22 @@ async def verify_message(
     button: str | None = None,
 ):
     guild = interaction.guild
-
     updates = {}
 
-    # Clean inputs
     title = clean_input(title)
     image = clean_input(image)
     thumbnail = clean_input(thumbnail)
 
     if title is not None:
         updates["verify_title"] = title
-
     if description is not None:
         updates["verify_description"] = description
-
     if color is not None:
         updates["verify_color"] = color
-
     if image is not None:
         updates["verify_image_url"] = image
-
     if thumbnail is not None:
         updates["verify_thumbnail_url"] = thumbnail
-
-    # Button parsing
     if button is not None:
         label, emoji = parse_button(button)
         updates["verify_button_label"] = label
@@ -1323,7 +1281,6 @@ async def verify_message(
 
     await interaction.response.defer(ephemeral=True)
 
-    # delete old message
     if row["verify_message_id"]:
         try:
             old_msg = await channel.fetch_message(int(row["verify_message_id"]))
@@ -1333,7 +1290,6 @@ async def verify_message(
 
     new_msg = await channel.send(embed=embed, view=view)
     upsert_settings(guild.id, verify_message_id=str(new_msg.id))
-
     await interaction.followup.send(f"✅ Verify message updated in {channel.mention}", ephemeral=True)
 
 
@@ -1349,13 +1305,11 @@ async def verify_settings(
     channel: discord.TextChannel
 ):
     guild = interaction.guild
-
     upsert_settings(
         guild.id,
         verify_role_id=str(role.id),
         verify_channel_id=channel.id
     )
-
     await interaction.response.send_message(
         f"✅ Verify setup updated\nRole: {role.mention}\nChannel: {channel.mention}",
         ephemeral=True
@@ -1374,21 +1328,15 @@ async def verify_responses(
     already_verified_message: str | None = None,
 ):
     guild = interaction.guild
-
     updates = {}
-
     if success_message is not None:
         updates["verify_success_message"] = success_message
-
     if already_verified_message is not None:
         updates["verify_already_message"] = already_verified_message
-
     if not updates:
         await interaction.response.send_message("Provide at least one field.", ephemeral=True)
         return
-
     upsert_settings(guild.id, **updates)
-
     await interaction.response.send_message("✅ Verify responses updated!", ephemeral=True)
 
 
@@ -1467,7 +1415,6 @@ async def autoresponder_add(
 ):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip().lstrip(".")
-
     conn = get_db()
     cur = conn.cursor()
     try:
@@ -1498,7 +1445,6 @@ async def autoresponder_edit(
 ):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip().lstrip(".")
-
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT * FROM autoresponders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
@@ -1507,9 +1453,7 @@ async def autoresponder_edit(
         conn.close()
         await interaction.response.send_message(f"No autoresponder `.{trigger}` found.", ephemeral=True)
         return
-
     final_message = message if message is not None else row["message"]
-
     cur.execute(
         "UPDATE autoresponders SET message = ? WHERE guild_id = ? AND trigger = ?",
         (final_message, guild.id, trigger),
@@ -1581,7 +1525,6 @@ async def waitlist_create(
 
     data = load_waitlists()
     key = get_waitlist_key(interaction.guild.id)
-
     final_title = title or f"{interaction.guild.name}'s waitlist"
 
     embed = build_waitlist_embed(interaction.guild, final_title, [], color)
@@ -1595,7 +1538,6 @@ async def waitlist_create(
         "message_id": msg.id,
         "users": []
     }
-
     save_waitlists(data)
 
 
