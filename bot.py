@@ -532,7 +532,7 @@ class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
 
         preview = build_embed(
             title=None,
-            description=str(self.welcome_text).replace("{mention}", interaction.user.display_name),
+            description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", member.mention).replace("\\n", "\n")
             theme=str(self.theme) or "pink",
             image=str(self.banner_url) or None,
             thumbnail=None,
