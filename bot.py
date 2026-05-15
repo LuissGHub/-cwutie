@@ -806,7 +806,7 @@ async def on_message(message: discord.Message):
         except Exception:
             pass
 
-   new_msg = await message.channel.send(row["message"].replace("\\n", "\n").replace("{mention}", message.author.mention))
+    new_msg = await message.channel.send(row["message"].replace("\\n", "\n").replace("{mention}", message.author.mention))
 
     conn = get_db()
     cur = conn.cursor()
