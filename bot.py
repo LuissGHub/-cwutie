@@ -11,12 +11,6 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
-# ———————————————––verify
-
-# Setup
-
-# ———————————————––
-
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -31,9 +25,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ———————————————––
-
 # Database
-
 # ———————————————––
 
 def get_db() -> sqlite3.Connection:
@@ -120,10 +112,35 @@ def init_db() -> None:
             trigger TEXT NOT NULL,
             message TEXT NOT NULL,
             ping_roles TEXT,
+            match_type TEXT DEFAULT 'exact',
             UNIQUE(guild_id, trigger)
         )
         """
     )
+
+    try:
+        cur.execute("ALTER TABLE autoresponders ADD COLUMN match_type TEXT DEFAULT 'exact'")
+    except sqlite3.OperationalError:
+        pass
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS image_responders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            trigger TEXT NOT NULL,
+            image_url TEXT NOT NULL,
+            caption TEXT,
+            match_type TEXT DEFAULT 'exact',
+            UNIQUE(guild_id, trigger)
+        )
+        """
+    )
+
+    try:
+        cur.execute("ALTER TABLE image_responders ADD COLUMN match_type TEXT DEFAULT 'exact'")
+    except sqlite3.OperationalError:
+        pass
 
     conn.commit()
     conn.close()
@@ -131,28 +148,12 @@ def init_db() -> None:
 
 def upsert_settings(guild_id: int, **kwargs) -> None:
     allowed = {
-        "welcome_channel_id",
-        "welcome_banner_url",
-        "welcome_theme",
-        "welcome_text",
-        "verify_role_id",
-        "verify_message_id",
-        "verify_channel_id",
-        "verify_button_label",
-        "verify_button_emoji",
-        "verify_title",
-        "verify_description",
-        "verify_color",
-        "verify_image_url",
-        "verify_thumbnail_url",
-        "verify_success_message",
-        "verify_already_message",
-        "boost_channel_id",
-        "boost_text",
-        "boost_title",
-        "boost_color",
-        "boost_image_url",
-        "boost_thumbnail_url",
+        "welcome_channel_id", "welcome_banner_url", "welcome_theme", "welcome_text",
+        "verify_role_id", "verify_message_id", "verify_channel_id", "verify_button_label",
+        "verify_button_emoji", "verify_title", "verify_description", "verify_color",
+        "verify_image_url", "verify_thumbnail_url", "verify_success_message",
+        "verify_already_message", "boost_channel_id", "boost_text", "boost_title",
+        "boost_color", "boost_image_url", "boost_thumbnail_url",
     }
     updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not updates:
@@ -253,6 +254,12 @@ def parse_button(button: str | None):
     return button, None
 
 
+def parse_emoji(value: str | None):
+    if not value:
+        return None
+    return value.strip()
+
+
 WAITLIST_FILE = "waitlists.json"
 
 
@@ -273,24 +280,14 @@ def get_waitlist_key(guild_id: int):
     return str(guild_id)
 
 
-def build_waitlist_embed(
-    guild: discord.Guild,
-    title: str,
-    channel_ids: list[str],
-    color: str = "pink",
-) -> discord.Embed:
+def build_waitlist_embed(guild, title, channel_ids, color="pink"):
     lines = []
     for i, channel_id in enumerate(channel_ids, start=1):
         channel = guild.get_channel(int(channel_id))
         if channel:
             lines.append(f"{i}) <#{channel.id}>")
     description = "\n".join(lines) if lines else "*No orders in the waitlist yet.*"
-    embed = discord.Embed(
-        title=title,
-        description=description,
-        color=get_theme_color(color),
-    )
-    return embed
+    return discord.Embed(title=title, description=description, color=get_theme_color(color))
 
 
 async def update_waitlist_message(bot, guild_id: int):
@@ -309,79 +306,45 @@ async def update_waitlist_message(bot, guild_id: int):
         message = await channel.fetch_message(entry["message_id"])
     except discord.NotFound:
         return
-    embed = build_waitlist_embed(
-        guild,
-        entry["title"],
-        entry["users"],
-        entry.get("color", "pink"),
-    )
+    embed = build_waitlist_embed(guild, entry["title"], entry["users"], entry.get("color", "pink"))
     await message.edit(embed=embed)
 
 
 # ———————————————––
+# Helpers
+# ———————————————––
 
+def check_trigger(content_lower: str, trigger: str, match_type: str) -> bool:
+    """Returns True if the trigger matches based on match_type."""
+    if match_type == "anywhere":
+        return trigger in content_lower
+    # exact: whole message is just the word, with or without leading dot
+    return content_lower.lstrip(".") == trigger
+
+
+# ———————————————––
 # Modals
-
 # ———————————————––
 
 class EmbedModal(discord.ui.Modal, title="Create Embed"):
-    embed_title = discord.ui.TextInput(
-        label="Title",
-        required=False,
-        max_length=256,
-        placeholder="e.g.  ✨ server rules   |   leave blank for no title",
-    )
-    description = discord.ui.TextInput(
-        label="Description",
-        style=discord.TextStyle.paragraph,
-        required=False,
-        max_length=4000,
-        placeholder="e.g.  welcome to cwtie ugc! please read the rules below ♡",
-    )
-    theme = discord.ui.TextInput(
-        label="Color — theme name or hex",
-        required=False,
-        max_length=20,
-        default="pink",
-        placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3",
-    )
-    image = discord.ui.TextInput(
-        label="Big image URL (bottom of embed)",
-        required=False,
-        max_length=1000,
-        placeholder="e.g.  https://i.imgur.com/abc123.png",
-    )
-    thumbnail = discord.ui.TextInput(
-        label="Small image URL (top-right corner)",
-        required=False,
-        max_length=1000,
-        placeholder="e.g.  https://i.imgur.com/xyz456.png   |   ignored if use_avatar is on",
-    )
+    embed_title = discord.ui.TextInput(label="Title", required=False, max_length=256, placeholder="e.g.  ✨ server rules")
+    description = discord.ui.TextInput(label="Description", style=discord.TextStyle.paragraph, required=False, max_length=4000, placeholder="e.g.  welcome to cwtie ugc! ♡")
+    theme = discord.ui.TextInput(label="Color — theme name or hex", required=False, max_length=20, default="pink", placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
+    image = discord.ui.TextInput(label="Big image URL (bottom of embed)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.png")
+    thumbnail = discord.ui.TextInput(label="Small image URL (top-right corner)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/xyz456.png")
 
-    def __init__(
-        self,
-        use_avatar: bool,
-        save_name: str | None = None,
-        post_here: bool = False,
-        is_edit: bool = False,
-        prefill: dict | None = None,
-    ):
+    def __init__(self, use_avatar: bool, save_name: str | None = None, post_here: bool = False, is_edit: bool = False, prefill: dict | None = None):
         super().__init__()
         self.use_avatar = use_avatar
         self.save_name = save_name
         self.post_here = post_here
         self.is_edit = is_edit
         if prefill:
-            if prefill.get("embed_title"):
-                self.embed_title.default = prefill["embed_title"]
-            if prefill.get("description"):
-                self.description.default = prefill["description"]
-            if prefill.get("theme"):
-                self.theme.default = prefill["theme"]
-            if prefill.get("image_url"):
-                self.image.default = prefill["image_url"]
-            if prefill.get("thumbnail_url"):
-                self.thumbnail.default = prefill["thumbnail_url"]
+            if prefill.get("embed_title"): self.embed_title.default = prefill["embed_title"]
+            if prefill.get("description"): self.description.default = prefill["description"]
+            if prefill.get("theme"): self.theme.default = prefill["theme"]
+            if prefill.get("image_url"): self.image.default = prefill["image_url"]
+            if prefill.get("thumbnail_url"): self.thumbnail.default = prefill["thumbnail_url"]
 
     async def on_submit(self, interaction: discord.Interaction):
         guild_id = interaction.guild_id
@@ -395,10 +358,7 @@ class EmbedModal(discord.ui.Modal, title="Create Embed"):
             desc_val = "\u200b"
 
         embed = build_embed(
-            title=title_val,
-            description=desc_val,
-            theme=theme_val,
-            image=image_val,
+            title=title_val, description=desc_val, theme=theme_val, image=image_val,
             thumbnail=None if self.use_avatar else thumb_val,
             user_avatar_url=interaction.user.display_avatar.url if self.use_avatar else None,
         )
@@ -407,228 +367,114 @@ class EmbedModal(discord.ui.Modal, title="Create Embed"):
             now = datetime.now(timezone.utc).isoformat()
             conn = get_db()
             cur = conn.cursor()
-            cur.execute(
-                "SELECT id FROM saved_embeds WHERE guild_id = ? AND name = ?",
-                (guild_id, self.save_name),
-            )
+            cur.execute("SELECT id FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild_id, self.save_name))
             existing = cur.fetchone()
             conn.close()
 
             if existing and not self.is_edit:
-                await interaction.response.send_message(
-                    f"❌ An embed named **{self.save_name}** already exists!\n"
-                    f"Use `/embededit {self.save_name}` to edit it, or choose a different name.",
-                    ephemeral=True,
-                )
+                await interaction.response.send_message(f"❌ An embed named **{self.save_name}** already exists!\nUse `/embededit {self.save_name}` to edit it.", ephemeral=True)
                 return
 
             conn = get_db()
             cur = conn.cursor()
             if existing:
                 cur.execute(
-                    """UPDATE saved_embeds SET
-                         embed_title=?, description=?, theme=?, image_url=?,
-                         thumbnail_url=?, use_avatar=?, updated_at=?
-                       WHERE guild_id=? AND name=?""",
+                    "UPDATE saved_embeds SET embed_title=?, description=?, theme=?, image_url=?, thumbnail_url=?, use_avatar=?, updated_at=? WHERE guild_id=? AND name=?",
                     (title_val, desc_val, theme_val, image_val, thumb_val, int(self.use_avatar), now, guild_id, self.save_name),
                 )
             else:
                 cur.execute(
-                    """INSERT INTO saved_embeds
-                       (guild_id, name, embed_title, description, theme, image_url, thumbnail_url, use_avatar, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    "INSERT INTO saved_embeds (guild_id, name, embed_title, description, theme, image_url, thumbnail_url, use_avatar, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (guild_id, self.save_name, title_val, desc_val, theme_val, image_val, thumb_val, int(self.use_avatar), now, now),
                 )
             conn.commit()
             conn.close()
             if self.post_here:
                 await interaction.response.send_message(embed=embed)
-                await interaction.followup.send(
-                    f"✅ Also saved as **{self.save_name}**. Use `/embedsend {self.save_name}` anytime to repost it.",
-                    ephemeral=True,
-                )
+                await interaction.followup.send(f"✅ Also saved as **{self.save_name}**. Use `/embedsend {self.save_name}` anytime to repost it.", ephemeral=True)
             else:
-                await interaction.response.send_message(
-                    f"✅ Saved as **{self.save_name}**! Use `/embedsend {self.save_name}` to post it in any channel.",
-                    embed=embed,
-                    ephemeral=True,
-                )
+                await interaction.response.send_message(f"✅ Saved as **{self.save_name}**! Use `/embedsend {self.save_name}` to post it in any channel.", embed=embed, ephemeral=True)
         else:
             await interaction.response.send_message(embed=embed)
 
 
 class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
-    welcome_text = discord.ui.TextInput(
-        label="Welcome message text",
-        style=discord.TextStyle.paragraph,
-        required=True,
-        max_length=2000,
-        placeholder="e.g.  🐇 welcome {mention} to cwtie ugc! enjoy your stay ♡",
-    )
-    theme = discord.ui.TextInput(
-        label="Color — theme name or hex",
-        required=False,
-        max_length=20,
-        placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3",
-    )
-    banner_url = discord.ui.TextInput(
-        label="Banner image URL (big image at bottom)",
-        required=False,
-        max_length=1000,
-        placeholder="e.g.  https://i.imgur.com/abc123.gif",
-    )
+    welcome_text = discord.ui.TextInput(label="Welcome message text", style=discord.TextStyle.paragraph, required=True, max_length=2000, placeholder="e.g.  🐇 welcome {mention} to cwtie ugc! ♡")
+    theme = discord.ui.TextInput(label="Color — theme name or hex", required=False, max_length=20, placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
+    banner_url = discord.ui.TextInput(label="Banner image URL (big image at bottom)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.gif")
 
     def __init__(self, prefill: dict | None = None):
         super().__init__()
         if prefill:
-            if prefill.get("welcome_text"):
-                self.welcome_text.default = prefill["welcome_text"]
-            if prefill.get("welcome_theme"):
-                self.theme.default = prefill["welcome_theme"]
-            if prefill.get("welcome_banner_url"):
-                self.banner_url.default = prefill["welcome_banner_url"]
+            if prefill.get("welcome_text"): self.welcome_text.default = prefill["welcome_text"]
+            if prefill.get("welcome_theme"): self.theme.default = prefill["welcome_theme"]
+            if prefill.get("welcome_banner_url"): self.banner_url.default = prefill["welcome_banner_url"]
 
     async def on_submit(self, interaction: discord.Interaction):
         guild = guild_only(interaction)
         kwargs: dict = {"welcome_text": str(self.welcome_text)}
-        if str(self.theme).strip():
-            kwargs["welcome_theme"] = str(self.theme).strip()
-        if str(self.banner_url).strip():
-            kwargs["welcome_banner_url"] = str(self.banner_url).strip()
+        if str(self.theme).strip(): kwargs["welcome_theme"] = str(self.theme).strip()
+        if str(self.banner_url).strip(): kwargs["welcome_banner_url"] = str(self.banner_url).strip()
         upsert_settings(guild.id, **kwargs)
-
         preview = build_embed(
-            title=None,
-            description=str(self.welcome_text).replace("{mention}", interaction.user.mention),
-            theme=str(self.theme) or "pink",
-            image=str(self.banner_url) or None,
-            thumbnail=None,
+            title=None, description=str(self.welcome_text).replace("{mention}", interaction.user.mention),
+            theme=str(self.theme) or "pink", image=str(self.banner_url) or None, thumbnail=None,
             user_avatar_url=interaction.user.display_avatar.url,
         )
-        await interaction.response.send_message(
-            "✅ Welcome settings updated! Here's a preview:",
-            embed=preview,
-            ephemeral=True,
-        )
+        await interaction.response.send_message("✅ Welcome settings updated! Here's a preview:", embed=preview, ephemeral=True)
 
 
 class BoostEditModal(discord.ui.Modal, title="Edit Boost Settings"):
-    boost_title = discord.ui.TextInput(
-        label="Title",
-        required=False,
-        max_length=256,
-        placeholder="e.g.  💖 server boost!   |   leave blank for no title",
-    )
-    boost_text = discord.ui.TextInput(
-        label="Message — use {mention}, {username}, {server}",
-        style=discord.TextStyle.paragraph,
-        required=False,
-        max_length=2000,
-        placeholder="e.g.  thank you {mention} for boosting {server} ♡",
-    )
-    theme = discord.ui.TextInput(
-        label="Color — theme name or hex",
-        required=False,
-        max_length=20,
-        default="pink",
-        placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3",
-    )
-    image = discord.ui.TextInput(
-        label="Big image URL (bottom of embed)",
-        required=False,
-        max_length=1000,
-        placeholder="e.g.  https://i.imgur.com/abc123.gif",
-    )
-    thumbnail = discord.ui.TextInput(
-        label="Small image URL (top-right corner)",
-        required=False,
-        max_length=1000,
-        placeholder="e.g.  https://i.imgur.com/xyz456.png",
-    )
+    boost_title = discord.ui.TextInput(label="Title", required=False, max_length=256, placeholder="e.g.  💖 server boost!")
+    boost_text = discord.ui.TextInput(label="Message — use {mention}, {username}, {server}", style=discord.TextStyle.paragraph, required=False, max_length=2000, placeholder="e.g.  thank you {mention} for boosting {server} ♡")
+    theme = discord.ui.TextInput(label="Color — theme name or hex", required=False, max_length=20, default="pink", placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
+    image = discord.ui.TextInput(label="Big image URL (bottom of embed)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.gif")
+    thumbnail = discord.ui.TextInput(label="Small image URL (top-right corner)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/xyz456.png")
 
     def __init__(self, prefill: dict | None = None):
         super().__init__()
         if prefill:
-            if prefill.get("boost_title"):
-                self.boost_title.default = prefill["boost_title"]
-            if prefill.get("boost_text"):
-                self.boost_text.default = prefill["boost_text"]
-            if prefill.get("boost_color"):
-                self.theme.default = prefill["boost_color"]
-            if prefill.get("boost_image_url"):
-                self.image.default = prefill["boost_image_url"]
-            if prefill.get("boost_thumbnail_url"):
-                self.thumbnail.default = prefill["boost_thumbnail_url"]
+            if prefill.get("boost_title"): self.boost_title.default = prefill["boost_title"]
+            if prefill.get("boost_text"): self.boost_text.default = prefill["boost_text"]
+            if prefill.get("boost_color"): self.theme.default = prefill["boost_color"]
+            if prefill.get("boost_image_url"): self.image.default = prefill["boost_image_url"]
+            if prefill.get("boost_thumbnail_url"): self.thumbnail.default = prefill["boost_thumbnail_url"]
 
     async def on_submit(self, interaction: discord.Interaction):
         guild = guild_only(interaction)
         updates = {}
-        if str(self.boost_title).strip():
-            updates["boost_title"] = str(self.boost_title).strip()
-        if str(self.boost_text).strip():
-            updates["boost_text"] = str(self.boost_text).strip()
-        if str(self.theme).strip():
-            updates["boost_color"] = str(self.theme).strip()
-        if str(self.image).strip():
-            updates["boost_image_url"] = str(self.image).strip()
-        if str(self.thumbnail).strip():
-            updates["boost_thumbnail_url"] = str(self.thumbnail).strip()
-
-        if updates:
-            upsert_settings(guild.id, **updates)
-
+        if str(self.boost_title).strip(): updates["boost_title"] = str(self.boost_title).strip()
+        if str(self.boost_text).strip(): updates["boost_text"] = str(self.boost_text).strip()
+        if str(self.theme).strip(): updates["boost_color"] = str(self.theme).strip()
+        if str(self.image).strip(): updates["boost_image_url"] = str(self.image).strip()
+        if str(self.thumbnail).strip(): updates["boost_thumbnail_url"] = str(self.thumbnail).strip()
+        if updates: upsert_settings(guild.id, **updates)
         thumb = str(self.thumbnail).strip() or None
-        preview_text = (str(self.boost_text).strip() or "thank you {mention} for boosting! ♡").replace(
-            "{mention}", interaction.user.mention
-        ).replace("{username}", interaction.user.name).replace("{server}", guild.name)
-
-        embed = build_embed(
-            title=str(self.boost_title).strip() or None,
-            description=preview_text,
-            theme=str(self.theme).strip() or "pink",
-            image=str(self.image).strip() or None,
-            thumbnail=thumb,
-            user_avatar_url=interaction.user.display_avatar.url if not thumb else None,
-        )
-        await interaction.response.send_message(
-            "✅ Boost settings updated! Here's a preview:",
-            embed=embed,
-            ephemeral=True,
-        )
+        preview_text = (str(self.boost_text).strip() or "thank you {mention} for boosting! ♡").replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
+        embed = build_embed(title=str(self.boost_title).strip() or None, description=preview_text, theme=str(self.theme).strip() or "pink", image=str(self.image).strip() or None, thumbnail=thumb, user_avatar_url=interaction.user.display_avatar.url if not thumb else None)
+        await interaction.response.send_message("✅ Boost settings updated! Here's a preview:", embed=embed, ephemeral=True)
 
 
 # ———————————————––
-
 # Verify Views
-
 # ———————————————––
-
 
 class VerifyButton(discord.ui.Button):
     def __init__(self, label: str = "Verify", emoji=None):
-        super().__init__(
-            label=label or "Verify",
-            emoji=emoji,
-            style=discord.ButtonStyle.secondary,
-            custom_id="verify_button",
-        )
+        super().__init__(label=label or "Verify", emoji=emoji, style=discord.ButtonStyle.secondary, custom_id="verify_button")
 
     async def callback(self, interaction: discord.Interaction):
         guild = interaction.guild
         settings = get_settings(guild.id)
         role_id = settings["verify_role_id"] if settings else None
-
         if not role_id:
             return await interaction.response.send_message("⚠️ No verify role set.", ephemeral=True)
-
         role = guild.get_role(int(role_id))
         if not role:
             return await interaction.response.send_message("⚠️ Verify role not found.", ephemeral=True)
-
         if role in interaction.user.roles:
             msg = (settings["verify_already_message"] or "✅ You're already verified!")
             return await interaction.response.send_message(msg, ephemeral=True)
-
         try:
             await interaction.user.add_roles(role)
             msg = (settings["verify_success_message"] or "✅ You've been verified!")
@@ -644,11 +490,8 @@ class VerifyView(discord.ui.View):
 
 
 # ———————————————––
-
 # Waitlist Views
-
 # ———————————————––
-
 
 class WaitlistRemoveSelect(discord.ui.Select):
     def __init__(self, options):
@@ -662,13 +505,9 @@ class WaitlistRemoveSelect(discord.ui.Select):
             data[key]["users"].remove(cid)
             save_waitlists(data)
             await update_waitlist_message(bot, interaction.guild.id)
-            await interaction.response.edit_message(
-                content="✅ Removed from the waitlist.", view=None
-            )
+            await interaction.response.edit_message(content="✅ Removed from the waitlist.", view=None)
         else:
-            await interaction.response.edit_message(
-                content="❌ That entry wasn't found.", view=None
-            )
+            await interaction.response.edit_message(content="❌ That entry wasn't found.", view=None)
 
 
 class WaitlistRemoveView(discord.ui.View):
@@ -683,18 +522,14 @@ class WaitlistRemoveView(discord.ui.View):
 
 
 # ———————————————––
-
 # Events
-
 # ———————————————––
-
 
 @bot.event
 async def on_ready():
     init_db()
     bot.add_view(VerifyView())
     print(f"Bot user: {bot.user}")
-
     synced = await bot.tree.sync()
     print(f"Synced {len(synced)} global command(s)")
     if GUILD_ID:
@@ -716,14 +551,7 @@ async def on_member_join(member: discord.Member):
     if channel is None:
         return
     description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", member.mention).replace("\\n", "\n")
-    embed = build_embed(
-        title=None,
-        description=description,
-        theme=settings["welcome_theme"] or "pink",
-        image=settings["welcome_banner_url"],
-        thumbnail=None,
-        user_avatar_url=member.display_avatar.url,
-    )
+    embed = build_embed(title=None, description=description, theme=settings["welcome_theme"] or "pink", image=settings["welcome_banner_url"], thumbnail=None, user_avatar_url=member.display_avatar.url)
     await channel.send(embed=embed)
 
 
@@ -733,26 +561,11 @@ async def on_member_update(before: discord.Member, after: discord.Member):
         settings = get_settings(after.guild.id)
         if not settings or not settings["boost_channel_id"]:
             return
-
         channel = after.guild.get_channel(int(settings["boost_channel_id"]))
         if channel is None:
             return
-
-        text = (settings["boost_text"] or "thank you {mention} for boosting! ♡").replace(
-            "{mention}", after.mention
-        )
-        text = text.replace("{username}", after.name)
-        text = text.replace("{server}", after.guild.name)
-
-        embed = build_embed(
-            title=settings["boost_title"] or None,
-            description=text,
-            theme=settings["boost_color"] or "pink",
-            image=settings["boost_image_url"] or None,
-            thumbnail=settings["boost_thumbnail_url"] or None,
-            user_avatar_url=after.display_avatar.url if not settings["boost_thumbnail_url"] else None,
-        )
-
+        text = (settings["boost_text"] or "thank you {mention} for boosting! ♡").replace("{mention}", after.mention).replace("{username}", after.name).replace("{server}", after.guild.name)
+        embed = build_embed(title=settings["boost_title"] or None, description=text, theme=settings["boost_color"] or "pink", image=settings["boost_image_url"] or None, thumbnail=settings["boost_thumbnail_url"] or None, user_avatar_url=after.display_avatar.url if not settings["boost_thumbnail_url"] else None)
         await channel.send(embed=embed)
 
 
@@ -766,33 +579,41 @@ async def on_message(message: discord.Message):
         return
 
     content = message.content.strip()
-    if content.startswith("."):
-        trigger = content[1:].split()[0].lower() if len(content) > 1 else ""
-        if trigger:
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT message, ping_roles FROM autoresponders WHERE guild_id = ? AND trigger = ?",
-                (message.guild.id, trigger),
-            )
-            ar = cur.fetchone()
-            conn.close()
-            if ar:
-                ping_text = ""
-                if ar["ping_roles"]:
-                    role_ids = [r for r in ar["ping_roles"].split(",") if r]
-                    ping_text = " ".join(f"<@&{rid}>" for rid in role_ids) + " "
-                await message.channel.send(ping_text + ar["message"].replace("\\n", "\n"))
+    content_lower = content.lower()
 
-    if message.guild is None:
-        return
-
+    # ── Autoresponders ──
     conn = get_db()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT message, last_message_id FROM sticky_messages WHERE guild_id = ? AND channel_id = ?",
-        (message.guild.id, message.channel.id),
-    )
+    cur.execute("SELECT trigger, message, ping_roles, match_type FROM autoresponders WHERE guild_id = ?", (message.guild.id,))
+    all_ars = cur.fetchall()
+    conn.close()
+
+    for ar in all_ars:
+        if check_trigger(content_lower, ar["trigger"], ar["match_type"] or "exact"):
+            ping_text = ""
+            if ar["ping_roles"]:
+                role_ids = [r for r in ar["ping_roles"].split(",") if r]
+                ping_text = " ".join(f"<@&{rid}>" for rid in role_ids) + " "
+            await message.channel.send(ping_text + ar["message"].replace("\\n", "\n"))
+            break
+
+    # ── Image responders ──
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT trigger, image_url, caption, match_type FROM image_responders WHERE guild_id = ?", (message.guild.id,))
+    all_imgs = cur.fetchall()
+    conn.close()
+
+    for img in all_imgs:
+        if check_trigger(content_lower, img["trigger"], img["match_type"] or "exact"):
+            embed = build_embed(title=None, description=img["caption"] or None, theme="pink", image=img["image_url"])
+            await message.channel.send(embed=embed)
+            break
+
+    # ── Sticky messages ──
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT message, last_message_id FROM sticky_messages WHERE guild_id = ? AND channel_id = ?", (message.guild.id, message.channel.id))
     row = cur.fetchone()
     conn.close()
 
@@ -810,50 +631,20 @@ async def on_message(message: discord.Message):
 
     conn = get_db()
     cur = conn.cursor()
-    cur.execute(
-        "UPDATE sticky_messages SET last_message_id = ? WHERE guild_id = ? AND channel_id = ?",
-        (new_msg.id, message.guild.id, message.channel.id),
-    )
+    cur.execute("UPDATE sticky_messages SET last_message_id = ? WHERE guild_id = ? AND channel_id = ?", (new_msg.id, message.guild.id, message.channel.id))
     conn.commit()
     conn.close()
 
 
 # ———————————————––
-
 # Commands — Embed
-
 # ———————————————––
 
-
 @bot.tree.command(name="embed", description="Create and post a custom embed in this channel")
-@app_commands.describe(
-    title="Embed title — supports server emojis",
-    description="Embed text — supports server emojis",
-    color="Theme or hex color e.g. pink / #f7cfe3",
-    image="Big image URL at the bottom",
-    thumbnail="Small image URL top-right",
-    use_avatar="Use your Discord avatar as the small top-right image",
-    save="Name to save it for reuse e.g. rules",
-)
-async def embed_command(
-    interaction: discord.Interaction,
-    title: str | None = None,
-    description: str | None = None,
-    color: str = "pink",
-    image: str | None = None,
-    thumbnail: str | None = None,
-    use_avatar: bool = False,
-    save: str | None = None,
-):
+@app_commands.describe(title="Embed title", description="Embed text", color="Theme or hex color e.g. pink / #f7cfe3", image="Big image URL at the bottom", thumbnail="Small image URL top-right", use_avatar="Use your Discord avatar as the small top-right image", save="Name to save it for reuse e.g. rules")
+async def embed_command(interaction: discord.Interaction, title: str | None = None, description: str | None = None, color: str = "pink", image: str | None = None, thumbnail: str | None = None, use_avatar: bool = False, save: str | None = None):
     guild_id = interaction.guild_id
-    embed = build_embed(
-        title=title or None,
-        description=description or None,
-        theme=color or "pink",
-        image=image,
-        thumbnail=None if use_avatar else thumbnail,
-        user_avatar_url=interaction.user.display_avatar.url if use_avatar else None,
-    )
+    embed = build_embed(title=title or None, description=description or None, theme=color or "pink", image=image, thumbnail=None if use_avatar else thumbnail, user_avatar_url=interaction.user.display_avatar.url if use_avatar else None)
     if save and guild_id:
         conn = get_db()
         cur = conn.cursor()
@@ -861,18 +652,10 @@ async def embed_command(
         existing = cur.fetchone()
         if existing:
             conn.close()
-            await interaction.response.send_message(
-                f"❌ An embed named **{save}** already exists! Use `/embededit {save}` to edit it.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message(f"❌ An embed named **{save}** already exists! Use `/embededit {save}` to edit it.", ephemeral=True)
             return
         now = datetime.now(timezone.utc).isoformat()
-        cur.execute(
-            """INSERT INTO saved_embeds
-            (guild_id, name, embed_title, description, theme, image_url, thumbnail_url, use_avatar, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (guild_id, save, title, description, color, image, thumbnail, int(use_avatar), now, now),
-        )
+        cur.execute("INSERT INTO saved_embeds (guild_id, name, embed_title, description, theme, image_url, thumbnail_url, use_avatar, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (guild_id, save, title, description, color, image, thumbnail, int(use_avatar), now, now))
         conn.commit()
         conn.close()
         await interaction.response.send_message(embed=embed)
@@ -886,10 +669,7 @@ async def embedlist(interaction: discord.Interaction):
     guild = guild_only(interaction)
     conn = get_db()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT name, embed_title, post_channel_id, updated_at FROM saved_embeds WHERE guild_id = ? ORDER BY name",
-        (guild.id,),
-    )
+    cur.execute("SELECT name, embed_title, post_channel_id, updated_at FROM saved_embeds WHERE guild_id = ? ORDER BY name", (guild.id,))
     rows = cur.fetchall()
     conn.close()
     if not rows:
@@ -900,11 +680,7 @@ async def embedlist(interaction: discord.Interaction):
         ch = guild.get_channel(row["post_channel_id"]) if row["post_channel_id"] else None
         ch_text = ch.mention if ch else "*(no channel — use /embedchannel)*"
         t_text = f'"{row["embed_title"]}"' if row["embed_title"] else "*(no title)*"
-        embed.add_field(
-            name=f"• {row['name']}",
-            value=f"Title: {t_text}\nPost to: {ch_text}\nUpdated: {row['updated_at'][:10]}",
-            inline=False,
-        )
+        embed.add_field(name=f"• {row['name']}", value=f"Title: {t_text}\nPost to: {ch_text}\nUpdated: {row['updated_at'][:10]}", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -918,18 +694,9 @@ async def embedpost(interaction: discord.Interaction, name: str):
     row = cur.fetchone()
     conn.close()
     if row is None:
-        await interaction.response.send_message(
-            f"No embed named **{name}**. Use `/embedlist` to see all saved embeds.",
-            ephemeral=True,
-        )
+        await interaction.response.send_message(f"No embed named **{name}**. Use `/embedlist` to see all saved embeds.", ephemeral=True)
         return
-    embed = build_embed(
-        title=row["embed_title"],
-        description=row["description"] or "\u200b",
-        theme=row["theme"] or "pink",
-        image=row["image_url"],
-        thumbnail=None if row["use_avatar"] else row["thumbnail_url"],
-    )
+    embed = build_embed(title=row["embed_title"], description=row["description"] or "\u200b", theme=row["theme"] or "pink", image=row["image_url"], thumbnail=None if row["use_avatar"] else row["thumbnail_url"])
     await interaction.response.defer(ephemeral=True)
     await interaction.channel.send(embed=embed)
 
@@ -946,16 +713,8 @@ async def embededit(interaction: discord.Interaction, name: str):
     if row is None:
         await interaction.response.send_message(f"No embed named **{name}**. Use `/embedlist`.", ephemeral=True)
         return
-    prefill = {
-        "embed_title": row["embed_title"],
-        "description": row["description"],
-        "theme": row["theme"],
-        "image_url": row["image_url"],
-        "thumbnail_url": row["thumbnail_url"],
-    }
-    await interaction.response.send_modal(
-        EmbedModal(use_avatar=bool(row["use_avatar"]), save_name=name, is_edit=True, prefill=prefill)
-    )
+    prefill = {"embed_title": row["embed_title"], "description": row["description"], "theme": row["theme"], "image_url": row["image_url"], "thumbnail_url": row["thumbnail_url"]}
+    await interaction.response.send_modal(EmbedModal(use_avatar=bool(row["use_avatar"]), save_name=name, is_edit=True, prefill=prefill))
 
 
 @bot.tree.command(name="embedchannel", description="Set which channel a saved embed posts to")
@@ -993,81 +752,40 @@ async def embeddelete(interaction: discord.Interaction, name: str):
 
 
 # ———————————————––
-
 # Commands — Welcome
-
 # ———————————————––
-
 
 @bot.tree.command(name="welcome_setup", description="Set up the welcome message")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(
-    welcome_channel="Channel where welcome messages will be sent",
-    welcome_text="Welcome message — use {mention} to tag the new member, supports :cwutie: emojis",
-    color="Theme name or hex like #f7cfe3",
-    banner_url="Big image URL at the bottom of the welcome embed",
-)
-async def welcome_setup(
-    interaction: discord.Interaction,
-    welcome_channel: discord.TextChannel,
-    welcome_text: str,
-    color: str = "pink",
-    banner_url: str | None = None,
-):
+@app_commands.describe(welcome_channel="Channel where welcome messages will be sent", welcome_text="Welcome message — use {mention} to tag the new member", color="Theme name or hex like #f7cfe3", banner_url="Big image URL at the bottom of the welcome embed")
+async def welcome_setup(interaction: discord.Interaction, welcome_channel: discord.TextChannel, welcome_text: str, color: str = "pink", banner_url: str | None = None):
     guild = guild_only(interaction)
     kwargs = dict(welcome_channel_id=welcome_channel.id, welcome_text=welcome_text.replace("\\n", "\n"), welcome_theme=color)
-    if banner_url:
-        kwargs["welcome_banner_url"] = banner_url
+    if banner_url: kwargs["welcome_banner_url"] = banner_url
     upsert_settings(guild.id, **kwargs)
-    preview = build_embed(
-        title=None,
-        description=welcome_text.replace("{mention}", interaction.user.mention),
-        theme=color,
-        image=banner_url,
-        thumbnail=None,
-        user_avatar_url=interaction.user.display_avatar.url,
-    )
+    preview = build_embed(title=None, description=welcome_text.replace("{mention}", interaction.user.mention), theme=color, image=banner_url, thumbnail=None, user_avatar_url=interaction.user.display_avatar.url)
     await interaction.response.send_message("✅ Welcome message saved! Preview:", embed=preview, ephemeral=True)
 
 
 @bot.tree.command(name="welcome_edit", description="Edit the welcome message")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(
-    welcome_text="New welcome text — use {mention} to tag new member, supports :cwutie: emojis",
-    color="New color — theme name or hex (leave blank to keep current)",
-    banner_url="New banner image URL (leave blank to keep current)",
-)
-async def welcome_edit(
-    interaction: discord.Interaction,
-    welcome_text: str | None = None,
-    color: str | None = None,
-    banner_url: str | None = None,
-):
+@app_commands.describe(welcome_text="New welcome text", color="New color — theme name or hex", banner_url="New banner image URL")
+async def welcome_edit(interaction: discord.Interaction, welcome_text: str | None = None, color: str | None = None, banner_url: str | None = None):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
     if not settings or not settings["welcome_channel_id"]:
         await interaction.response.send_message("Run `/welcome_setup` first to set a channel.", ephemeral=True)
         return
     kwargs = {}
-    if welcome_text:
-        kwargs["welcome_text"] = welcome_text
-    if color:
-        kwargs["welcome_theme"] = color
-    if banner_url:
-        kwargs["welcome_banner_url"] = banner_url
+    if welcome_text: kwargs["welcome_text"] = welcome_text
+    if color: kwargs["welcome_theme"] = color
+    if banner_url: kwargs["welcome_banner_url"] = banner_url
     if not kwargs:
         await interaction.response.send_message("Please provide at least one field to update.", ephemeral=True)
         return
     upsert_settings(guild.id, **kwargs)
     updated = get_settings(guild.id)
-    preview = build_embed(
-        title=None,
-        description=(updated["welcome_text"] or "Welcome!").replace("{mention}", interaction.user.mention),
-        theme=updated["welcome_theme"] or "pink",
-        image=updated["welcome_banner_url"],
-        thumbnail=None,
-        user_avatar_url=interaction.user.display_avatar.url,
-    )
+    preview = build_embed(title=None, description=(updated["welcome_text"] or "Welcome!").replace("{mention}", interaction.user.mention), theme=updated["welcome_theme"] or "pink", image=updated["welcome_banner_url"], thumbnail=None, user_avatar_url=interaction.user.display_avatar.url)
     await interaction.response.send_message("✅ Welcome message updated! Preview:", embed=preview, ephemeral=True)
 
 
@@ -1080,32 +798,19 @@ async def welcome_test(interaction: discord.Interaction):
         await interaction.response.send_message("Run `/welcome_setup` first.", ephemeral=True)
         return
     description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", interaction.user.mention)
-    embed = build_embed(
-        title=None,
-        description=description,
-        theme=settings["welcome_theme"] or "pink",
-        image=settings["welcome_banner_url"],
-        thumbnail=None,
-        user_avatar_url=interaction.user.display_avatar.url,
-    )
+    embed = build_embed(title=None, description=description, theme=settings["welcome_theme"] or "pink", image=settings["welcome_banner_url"], thumbnail=None, user_avatar_url=interaction.user.display_avatar.url)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="themes", description="Show available embed colors and button styles")
+@bot.tree.command(name="themes", description="Show available embed colors")
 async def themes(interaction: discord.Interaction):
     names = ", ".join(THEMES.keys())
-    await interaction.response.send_message(
-        f"**Embed colors:** {names}\nOr use any hex like `#f7cfe3`",
-        ephemeral=True,
-    )
+    await interaction.response.send_message(f"**Embed colors:** {names}\nOr use any hex like `#f7cfe3`", ephemeral=True)
 
 
 # ———————————————––
-
 # Commands — Boost
-
 # ———————————————––
-
 
 @bot.tree.command(name="set_boost_channel", description="Set the channel for boost announcements")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -1113,56 +818,22 @@ async def themes(interaction: discord.Interaction):
 async def set_boost_channel(interaction: discord.Interaction, channel: discord.TextChannel):
     guild = guild_only(interaction)
     upsert_settings(guild.id, boost_channel_id=channel.id)
-    await interaction.response.send_message(
-        f"✅ Boost announcements will go to {channel.mention}!",
-        ephemeral=True,
-    )
+    await interaction.response.send_message(f"✅ Boost announcements will go to {channel.mention}!", ephemeral=True)
 
 
 @bot.tree.command(name="set_boost_message", description="Set the boost message, title, color, and images")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(
-    message="Use {mention}, {username}, and {server}",
-    title="Embed title",
-    color="Theme name or hex like pink or #f7cfe3",
-    image="Big image URL at the bottom",
-    thumbnail="Small image URL at top-right",
-)
-async def set_boost_message(
-    interaction: discord.Interaction,
-    message: str,
-    title: str | None = None,
-    color: str = "pink",
-    image: str | None = None,
-    thumbnail: str | None = None,
-):
+@app_commands.describe(message="Use {mention}, {username}, and {server}", title="Embed title", color="Theme name or hex", image="Big image URL at the bottom", thumbnail="Small image URL at top-right")
+async def set_boost_message(interaction: discord.Interaction, message: str, title: str | None = None, color: str = "pink", image: str | None = None, thumbnail: str | None = None):
     guild = guild_only(interaction)
-    updates = dict(
-        boost_text=message.replace("\\n", "\n"),
-        boost_color=color,
-    )
-    if title is not None:
-        updates["boost_title"] = title
-    if image is not None:
-        updates["boost_image_url"] = image
-    if thumbnail is not None:
-        updates["boost_thumbnail_url"] = thumbnail
-
+    updates = dict(boost_text=message.replace("\\n", "\n"), boost_color=color)
+    if title is not None: updates["boost_title"] = title
+    if image is not None: updates["boost_image_url"] = image
+    if thumbnail is not None: updates["boost_thumbnail_url"] = thumbnail
     upsert_settings(guild.id, **updates)
-
     thumb = thumbnail or None
-    preview_text = message.replace("\\n", "\n").replace(
-        "{mention}", interaction.user.mention
-    ).replace("{username}", interaction.user.name).replace("{server}", guild.name)
-
-    embed = build_embed(
-        title=title or None,
-        description=preview_text,
-        theme=color,
-        image=image,
-        thumbnail=thumb,
-        user_avatar_url=interaction.user.display_avatar.url if not thumb else None,
-    )
+    preview_text = message.replace("\\n", "\n").replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
+    embed = build_embed(title=title or None, description=preview_text, theme=color, image=image, thumbnail=thumb, user_avatar_url=interaction.user.display_avatar.url if not thumb else None)
     await interaction.response.send_message("✅ Boost message saved! Preview:", embed=embed, ephemeral=True)
 
 
@@ -1174,13 +845,7 @@ async def boost_edit(interaction: discord.Interaction):
     if not settings or not settings["boost_channel_id"]:
         await interaction.response.send_message("Run `/set_boost_channel` first to set a channel.", ephemeral=True)
         return
-    prefill = {
-        "boost_title": settings["boost_title"],
-        "boost_text": settings["boost_text"],
-        "boost_color": settings["boost_color"],
-        "boost_image_url": settings["boost_image_url"],
-        "boost_thumbnail_url": settings["boost_thumbnail_url"],
-    }
+    prefill = {"boost_title": settings["boost_title"], "boost_text": settings["boost_text"], "boost_color": settings["boost_color"], "boost_image_url": settings["boost_image_url"], "boost_thumbnail_url": settings["boost_thumbnail_url"]}
     await interaction.response.send_modal(BoostEditModal(prefill=prefill))
 
 
@@ -1189,105 +854,49 @@ async def boost_edit(interaction: discord.Interaction):
 async def test_boost(interaction: discord.Interaction):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
-
     if not settings or not settings["boost_channel_id"]:
         await interaction.response.send_message("Run `/set_boost_channel` first.", ephemeral=True)
         return
-
-    text = (settings["boost_text"] or "thank you {mention} for boosting! ♡").replace(
-        "{mention}", interaction.user.mention
-    )
-    text = text.replace("{username}", interaction.user.name)
-    text = text.replace("{server}", guild.name)
-
-    embed = build_embed(
-        title=settings["boost_title"] or None,
-        description=text,
-        theme=settings["boost_color"] or "pink",
-        image=settings["boost_image_url"] or None,
-        thumbnail=settings["boost_thumbnail_url"] or None,
-        user_avatar_url=interaction.user.display_avatar.url if not settings["boost_thumbnail_url"] else None,
-    )
-
+    text = (settings["boost_text"] or "thank you {mention} for boosting! ♡").replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
+    embed = build_embed(title=settings["boost_title"] or None, description=text, theme=settings["boost_color"] or "pink", image=settings["boost_image_url"] or None, thumbnail=settings["boost_thumbnail_url"] or None, user_avatar_url=interaction.user.display_avatar.url if not settings["boost_thumbnail_url"] else None)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ———————————————––
-
 # Commands — Verify
-
 # ———————————————––
-
 
 @bot.tree.command(name="verify_message", description="Create or edit the verify embed")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(
-    title="Embed title (use 'none' to remove)",
-    description="Embed description",
-    color="Theme name or hex",
-    image="Big image URL (use 'none' to remove)",
-    thumbnail="Small image URL (use 'none' to remove)",
-    button="Button text + optional emoji (e.g. 💖 verify)"
-)
-async def verify_message(
-    interaction: discord.Interaction,
-    title: str | None = None,
-    description: str | None = None,
-    color: str | None = None,
-    image: str | None = None,
-    thumbnail: str | None = None,
-    button: str | None = None,
-):
+@app_commands.describe(title="Embed title (use 'none' to remove)", description="Embed description", color="Theme name or hex", image="Big image URL (use 'none' to remove)", thumbnail="Small image URL (use 'none' to remove)", button="Button text + optional emoji (e.g. 💖 verify)")
+async def verify_message(interaction: discord.Interaction, title: str | None = None, description: str | None = None, color: str | None = None, image: str | None = None, thumbnail: str | None = None, button: str | None = None):
     guild = interaction.guild
     updates = {}
-
     title = clean_input(title)
     image = clean_input(image)
     thumbnail = clean_input(thumbnail)
-
-    if title is not None:
-        updates["verify_title"] = title
-    if description is not None:
-        updates["verify_description"] = description
-    if color is not None:
-        updates["verify_color"] = color
-    if image is not None:
-        updates["verify_image_url"] = image
-    if thumbnail is not None:
-        updates["verify_thumbnail_url"] = thumbnail
+    if title is not None: updates["verify_title"] = title
+    if description is not None: updates["verify_description"] = description
+    if color is not None: updates["verify_color"] = color
+    if image is not None: updates["verify_image_url"] = image
+    if thumbnail is not None: updates["verify_thumbnail_url"] = thumbnail
     if button is not None:
         label, emoji = parse_button(button)
         updates["verify_button_label"] = label
         updates["verify_button_emoji"] = emoji
-
     upsert_settings(guild.id, **updates)
     row = get_settings(guild.id)
-
-    embed = build_embed(
-        title=row["verify_title"] if row["verify_title"] else None,
-        description=(row["verify_description"] or "Click the button below to verify!").replace("\\n", "\n"),
-        theme=row["verify_color"] or "pink",
-        image=row["verify_image_url"] if row["verify_image_url"] else None,
-        thumbnail=row["verify_thumbnail_url"] if row["verify_thumbnail_url"] else None,
-    )
-
-    view = VerifyView(
-        button_label=row["verify_button_label"],
-        button_emoji=parse_emoji(row["verify_button_emoji"])
-    )
-
+    embed = build_embed(title=row["verify_title"] if row["verify_title"] else None, description=(row["verify_description"] or "Click the button below to verify!").replace("\\n", "\n"), theme=row["verify_color"] or "pink", image=row["verify_image_url"] if row["verify_image_url"] else None, thumbnail=row["verify_thumbnail_url"] if row["verify_thumbnail_url"] else None)
+    view = VerifyView(button_label=row["verify_button_label"], button_emoji=parse_emoji(row["verify_button_emoji"]))
     channel_id = row["verify_channel_id"] or interaction.channel.id
     channel = guild.get_channel(int(channel_id))
-
     await interaction.response.defer(ephemeral=True)
-
     if row["verify_message_id"]:
         try:
             old_msg = await channel.fetch_message(int(row["verify_message_id"]))
             await old_msg.delete()
         except:
             pass
-
     new_msg = await channel.send(embed=embed, view=view)
     upsert_settings(guild.id, verify_message_id=str(new_msg.id))
     await interaction.followup.send(f"✅ Verify message updated in {channel.mention}", ephemeral=True)
@@ -1295,44 +904,21 @@ async def verify_message(
 
 @bot.tree.command(name="verify_settings", description="Set verify role and channel")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(
-    role="Role to give when verified",
-    channel="Channel to send the verify message"
-)
-async def verify_settings(
-    interaction: discord.Interaction,
-    role: discord.Role,
-    channel: discord.TextChannel
-):
+@app_commands.describe(role="Role to give when verified", channel="Channel to send the verify message")
+async def verify_settings(interaction: discord.Interaction, role: discord.Role, channel: discord.TextChannel):
     guild = interaction.guild
-    upsert_settings(
-        guild.id,
-        verify_role_id=str(role.id),
-        verify_channel_id=channel.id
-    )
-    await interaction.response.send_message(
-        f"✅ Verify setup updated\nRole: {role.mention}\nChannel: {channel.mention}",
-        ephemeral=True
-    )
+    upsert_settings(guild.id, verify_role_id=str(role.id), verify_channel_id=channel.id)
+    await interaction.response.send_message(f"✅ Verify setup updated\nRole: {role.mention}\nChannel: {channel.mention}", ephemeral=True)
 
 
 @bot.tree.command(name="verify_responses", description="Set verify response messages")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(
-    success_message="Message after verifying",
-    already_verified_message="Message if already verified"
-)
-async def verify_responses(
-    interaction: discord.Interaction,
-    success_message: str | None = None,
-    already_verified_message: str | None = None,
-):
+@app_commands.describe(success_message="Message after verifying", already_verified_message="Message if already verified")
+async def verify_responses(interaction: discord.Interaction, success_message: str | None = None, already_verified_message: str | None = None):
     guild = interaction.guild
     updates = {}
-    if success_message is not None:
-        updates["verify_success_message"] = success_message
-    if already_verified_message is not None:
-        updates["verify_already_message"] = already_verified_message
+    if success_message is not None: updates["verify_success_message"] = success_message
+    if already_verified_message is not None: updates["verify_already_message"] = already_verified_message
     if not updates:
         await interaction.response.send_message("Provide at least one field.", ephemeral=True)
         return
@@ -1341,11 +927,8 @@ async def verify_responses(
 
 
 # ———————————————––
-
 # Commands — Sticky
-
 # ———————————————––
-
 
 @bot.tree.command(name="sticky_set", description="Set a sticky message for this channel")
 @app_commands.checks.has_permissions(manage_messages=True)
@@ -1354,10 +937,7 @@ async def sticky_set(interaction: discord.Interaction, message: str):
     guild = guild_only(interaction)
     conn = get_db()
     cur = conn.cursor()
-    cur.execute(
-        "INSERT OR REPLACE INTO sticky_messages (guild_id, channel_id, message) VALUES (?, ?, ?)",
-        (guild.id, interaction.channel_id, message),
-    )
+    cur.execute("INSERT OR REPLACE INTO sticky_messages (guild_id, channel_id, message) VALUES (?, ?, ?)", (guild.id, interaction.channel_id, message))
     conn.commit()
     conn.close()
     await interaction.response.send_message("✅ Sticky message set for this channel!", ephemeral=True)
@@ -1369,10 +949,7 @@ async def sticky_clear(interaction: discord.Interaction):
     guild = guild_only(interaction)
     conn = get_db()
     cur = conn.cursor()
-    cur.execute(
-        "DELETE FROM sticky_messages WHERE guild_id = ? AND channel_id = ?",
-        (guild.id, interaction.channel_id),
-    )
+    cur.execute("DELETE FROM sticky_messages WHERE guild_id = ? AND channel_id = ?", (guild.id, interaction.channel_id))
     conn.commit()
     conn.close()
     await interaction.response.send_message("🗑️ Sticky message cleared.", ephemeral=True)
@@ -1383,10 +960,7 @@ async def sticky_view(interaction: discord.Interaction):
     guild = guild_only(interaction)
     conn = get_db()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT message FROM sticky_messages WHERE guild_id = ? AND channel_id = ?",
-        (guild.id, interaction.channel_id),
-    )
+    cur.execute("SELECT message FROM sticky_messages WHERE guild_id = ? AND channel_id = ?", (guild.id, interaction.channel_id))
     row = cur.fetchone()
     conn.close()
     if not row:
@@ -1396,53 +970,39 @@ async def sticky_view(interaction: discord.Interaction):
 
 
 # ———————————————––
-
 # Commands — Autoresponder
-
 # ———————————————––
-
 
 @bot.tree.command(name="autoresponder_add", description="Create a new autoresponder trigger")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(
-    trigger="The trigger word after the dot — e.g. 'ask' for .ask",
-    message="The message to send when triggered — supports \\n for newlines",
-)
-async def autoresponder_add(
-    interaction: discord.Interaction,
-    trigger: str,
-    message: str,
-):
+@app_commands.describe(trigger="The trigger word — e.g. 'ask' for .ask or just 'ask'", message="The message to send when triggered — supports \\n for newlines", match_type="exact = only that word alone | anywhere = fires if it appears in any sentence")
+@app_commands.choices(match_type=[
+    app_commands.Choice(name="exact", value="exact"),
+    app_commands.Choice(name="anywhere", value="anywhere"),
+])
+async def autoresponder_add(interaction: discord.Interaction, trigger: str, message: str, match_type: str = "exact"):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip().lstrip(".")
     conn = get_db()
     cur = conn.cursor()
     try:
-        cur.execute(
-            "INSERT INTO autoresponders (guild_id, trigger, message, ping_roles) VALUES (?, ?, ?, ?)",
-            (guild.id, trigger, message, None),
-        )
+        cur.execute("INSERT INTO autoresponders (guild_id, trigger, message, ping_roles, match_type) VALUES (?, ?, ?, ?, ?)", (guild.id, trigger, message, None, match_type))
         conn.commit()
-        await interaction.response.send_message(f"✅ Autoresponder `.{trigger}` created!", ephemeral=True)
+        await interaction.response.send_message(f"✅ Autoresponder `{trigger}` created! (match: {match_type})", ephemeral=True)
     except sqlite3.IntegrityError:
-        await interaction.response.send_message(
-            f"❌ A trigger `.{trigger}` already exists. Use `/autoresponder_edit` to update it.", ephemeral=True
-        )
+        await interaction.response.send_message(f"❌ A trigger `{trigger}` already exists. Use `/autoresponder_edit` to update it.", ephemeral=True)
     finally:
         conn.close()
 
 
 @bot.tree.command(name="autoresponder_edit", description="Edit an existing autoresponder trigger")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(
-    trigger="The trigger to edit — e.g. 'ask' for .ask",
-    message="New message (leave blank to keep current)",
-)
-async def autoresponder_edit(
-    interaction: discord.Interaction,
-    trigger: str,
-    message: str | None = None,
-):
+@app_commands.describe(trigger="The trigger to edit", message="New message (leave blank to keep current)", match_type="Change the match type (leave blank to keep current)")
+@app_commands.choices(match_type=[
+    app_commands.Choice(name="exact", value="exact"),
+    app_commands.Choice(name="anywhere", value="anywhere"),
+])
+async def autoresponder_edit(interaction: discord.Interaction, trigger: str, message: str | None = None, match_type: str | None = None):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip().lstrip(".")
     conn = get_db()
@@ -1451,21 +1011,19 @@ async def autoresponder_edit(
     row = cur.fetchone()
     if not row:
         conn.close()
-        await interaction.response.send_message(f"No autoresponder `.{trigger}` found.", ephemeral=True)
+        await interaction.response.send_message(f"No autoresponder `{trigger}` found.", ephemeral=True)
         return
     final_message = message if message is not None else row["message"]
-    cur.execute(
-        "UPDATE autoresponders SET message = ? WHERE guild_id = ? AND trigger = ?",
-        (final_message, guild.id, trigger),
-    )
+    final_match = match_type if match_type is not None else (row["match_type"] or "exact")
+    cur.execute("UPDATE autoresponders SET message = ?, match_type = ? WHERE guild_id = ? AND trigger = ?", (final_message, final_match, guild.id, trigger))
     conn.commit()
     conn.close()
-    await interaction.response.send_message(f"✅ Autoresponder `.{trigger}` updated!", ephemeral=True)
+    await interaction.response.send_message(f"✅ Autoresponder `{trigger}` updated! (match: {final_match})", ephemeral=True)
 
 
 @bot.tree.command(name="autoresponder_remove", description="Delete an autoresponder trigger")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(trigger="The trigger to delete — e.g. 'ask' for .ask")
+@app_commands.describe(trigger="The trigger to delete")
 async def autoresponder_remove(interaction: discord.Interaction, trigger: str):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip().lstrip(".")
@@ -1476,9 +1034,9 @@ async def autoresponder_remove(interaction: discord.Interaction, trigger: str):
     conn.commit()
     conn.close()
     if deleted:
-        await interaction.response.send_message(f"🗑️ Autoresponder `.{trigger}` deleted.", ephemeral=True)
+        await interaction.response.send_message(f"🗑️ Autoresponder `{trigger}` deleted.", ephemeral=True)
     else:
-        await interaction.response.send_message(f"No autoresponder `.{trigger}` found.", ephemeral=True)
+        await interaction.response.send_message(f"No autoresponder `{trigger}` found.", ephemeral=True)
 
 
 @bot.tree.command(name="autoresponder_list", description="List all autoresponder triggers")
@@ -1487,7 +1045,7 @@ async def autoresponder_list(interaction: discord.Interaction):
     guild = guild_only(interaction)
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT trigger, message, ping_roles FROM autoresponders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
+    cur.execute("SELECT trigger, message, ping_roles, match_type FROM autoresponders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
     rows = cur.fetchall()
     conn.close()
     if not rows:
@@ -1499,7 +1057,97 @@ async def autoresponder_list(interaction: discord.Interaction):
         if row["ping_roles"]:
             roles_text = "\nPings: " + " ".join(f"<@&{r}>" for r in row["ping_roles"].split(",") if r)
         preview = row["message"][:60] + ("..." if len(row["message"]) > 60 else "")
-        embed.add_field(name=f"`.{row['trigger']}`", value=f"{preview}{roles_text}", inline=False)
+        embed.add_field(name=f"`{row['trigger']}` — {row['match_type'] or 'exact'}", value=f"{preview}{roles_text}", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ———————————————––
+# Commands — Image Responder
+# ———————————————––
+
+@bot.tree.command(name="imageresponder_add", description="Post an image when a keyword is triggered")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(trigger="Keyword to listen for", image_url="Image URL to post", caption="Optional caption text", match_type="exact = only that word alone | anywhere = fires if it appears in any sentence")
+@app_commands.choices(match_type=[
+    app_commands.Choice(name="exact", value="exact"),
+    app_commands.Choice(name="anywhere", value="anywhere"),
+])
+async def imageresponder_add(interaction: discord.Interaction, trigger: str, image_url: str, caption: str | None = None, match_type: str = "exact"):
+    guild = guild_only(interaction)
+    trigger = trigger.lower().strip()
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("INSERT INTO image_responders (guild_id, trigger, image_url, caption, match_type) VALUES (?, ?, ?, ?, ?)", (guild.id, trigger, image_url, caption, match_type))
+        conn.commit()
+        await interaction.response.send_message(f"✅ Image responder `{trigger}` created! (match: {match_type})", ephemeral=True)
+    except sqlite3.IntegrityError:
+        await interaction.response.send_message(f"❌ Trigger `{trigger}` already exists.", ephemeral=True)
+    finally:
+        conn.close()
+
+
+@bot.tree.command(name="imageresponder_edit", description="Edit an existing image responder")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(trigger="The trigger to edit", image_url="New image URL (leave blank to keep current)", caption="New caption (leave blank to keep current)", match_type="Change the match type (leave blank to keep current)")
+@app_commands.choices(match_type=[
+    app_commands.Choice(name="exact", value="exact"),
+    app_commands.Choice(name="anywhere", value="anywhere"),
+])
+async def imageresponder_edit(interaction: discord.Interaction, trigger: str, image_url: str | None = None, caption: str | None = None, match_type: str | None = None):
+    guild = guild_only(interaction)
+    trigger = trigger.lower().strip()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM image_responders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        await interaction.response.send_message(f"No image responder `{trigger}` found.", ephemeral=True)
+        return
+    final_image = image_url if image_url is not None else row["image_url"]
+    final_caption = caption if caption is not None else row["caption"]
+    final_match = match_type if match_type is not None else (row["match_type"] or "exact")
+    cur.execute("UPDATE image_responders SET image_url = ?, caption = ?, match_type = ? WHERE guild_id = ? AND trigger = ?", (final_image, final_caption, final_match, guild.id, trigger))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ Image responder `{trigger}` updated! (match: {final_match})", ephemeral=True)
+
+
+@bot.tree.command(name="imageresponder_remove", description="Delete an image responder")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(trigger="The keyword to delete")
+async def imageresponder_remove(interaction: discord.Interaction, trigger: str):
+    guild = guild_only(interaction)
+    trigger = trigger.lower().strip()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM image_responders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+    if deleted:
+        await interaction.response.send_message(f"🗑️ Image responder `{trigger}` deleted.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"No image responder `{trigger}` found.", ephemeral=True)
+
+
+@bot.tree.command(name="imageresponder_list", description="List all image responders")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def imageresponder_list(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT trigger, image_url, caption, match_type FROM image_responders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
+    rows = cur.fetchall()
+    conn.close()
+    if not rows:
+        await interaction.response.send_message("No image responders set up yet.", ephemeral=True)
+        return
+    embed = discord.Embed(title="🖼️ Image Responders", color=get_theme_color("pink"))
+    for row in rows:
+        caption_text = f"\nCaption: {row['caption']}" if row["caption"] else ""
+        embed.add_field(name=f"`{row['trigger']}` — {row['match_type'] or 'exact'}", value=f"[image link]({row['image_url']}){caption_text}", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -1507,38 +1155,39 @@ async def autoresponder_list(interaction: discord.Interaction):
 # Commands — Waitlist
 # ———————————————––
 
-
 @bot.tree.command(name="waitlist_create", description="Create a waitlist")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(
-    title="Waitlist title",
-    color="Theme name or hex like pink or #f7cfe3",
-)
-async def waitlist_create(
-    interaction: discord.Interaction,
-    title: str | None = None,
-    color: str = "pink",
-):
+@app_commands.describe(title="Waitlist title", color="Theme name or hex like pink or #f7cfe3")
+async def waitlist_create(interaction: discord.Interaction, title: str | None = None, color: str = "pink"):
     if interaction.guild is None:
         await interaction.response.send_message("Server only.", ephemeral=True)
         return
-
     data = load_waitlists()
     key = get_waitlist_key(interaction.guild.id)
     final_title = title or f"{interaction.guild.name}'s waitlist"
-
     embed = build_waitlist_embed(interaction.guild, final_title, [], color)
     await interaction.response.send_message("✅ Waitlist created!", ephemeral=True)
     msg = await interaction.channel.send(embed=embed)
-
-    data[key] = {
-        "title": final_title,
-        "color": color,
-        "channel_id": interaction.channel.id,
-        "message_id": msg.id,
-        "users": []
-    }
+    data[key] = {"title": final_title, "color": color, "channel_id": interaction.channel.id, "message_id": msg.id, "users": []}
     save_waitlists(data)
+
+
+@bot.tree.command(name="waitlist_add", description="Add a channel to the waitlist")
+@app_commands.describe(channel="Order channel to add")
+async def waitlist_add(interaction: discord.Interaction, channel: discord.TextChannel):
+    data = load_waitlists()
+    key = get_waitlist_key(interaction.guild.id)
+    if key not in data:
+        await interaction.response.send_message("Run /waitlist_create first.", ephemeral=True)
+        return
+    cid = str(channel.id)
+    if cid in data[key]["users"]:
+        await interaction.response.send_message("That channel is already in the waitlist.", ephemeral=True)
+        return
+    data[key]["users"].append(cid)
+    save_waitlists(data)
+    await update_waitlist_message(bot, interaction.guild.id)
+    await interaction.response.send_message(f"Added {channel.mention}", ephemeral=True)
 
 
 @bot.tree.command(name="waitlist_remove", description="Remove a channel from the waitlist")
@@ -1546,36 +1195,11 @@ async def waitlist_create(
 async def waitlist_remove(interaction: discord.Interaction):
     data = load_waitlists()
     key = get_waitlist_key(interaction.guild.id)
-
     if key not in data or not data[key]["users"]:
         await interaction.response.send_message("The waitlist is empty.", ephemeral=True)
         return
-
     view = WaitlistRemoveView(interaction.guild, data[key]["users"])
     await interaction.response.send_message("Select a channel to remove:", view=view, ephemeral=True)
-
-
-@bot.tree.command(name="waitlist_add", description="Add channel to waitlist")
-@app_commands.describe(channel="Order channel to add")
-async def waitlist_add(interaction: discord.Interaction, channel: discord.TextChannel):
-    data = load_waitlists()
-    key = get_waitlist_key(interaction.guild.id)
-
-    if key not in data:
-        await interaction.response.send_message("Run /waitlist_create first.", ephemeral=True)
-        return
-
-    cid = str(channel.id)
-
-    if cid in data[key]["users"]:
-        await interaction.response.send_message("That channel is already in the waitlist.", ephemeral=True)
-        return
-
-    data[key]["users"].append(cid)
-    save_waitlists(data)
-
-    await update_waitlist_message(bot, interaction.guild.id)
-    await interaction.response.send_message(f"Added {channel.mention}", ephemeral=True)
 
 
 if not TOKEN:
