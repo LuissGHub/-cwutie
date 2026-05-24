@@ -315,11 +315,10 @@ async def update_waitlist_message(bot, guild_id: int):
 # ———————————————––
 
 def check_trigger(content_lower: str, trigger: str, match_type: str) -> bool:
-    """Returns True if the trigger matches based on match_type."""
     if match_type == "anywhere":
         return trigger in content_lower
-    # exact: whole message is just the word, with or without leading dot
-    return content_lower.lstrip(".") == trigger
+    # exact: must have the dot prefix
+    return content_lower == f".{trigger}"
 
 
 # ———————————————––
