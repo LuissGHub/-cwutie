@@ -530,11 +530,13 @@ async def on_ready():
     init_db()
     bot.add_view(VerifyView())
     print(f"Bot user: {bot.user}")
+    bot.tree.clear_commands(guild=None)
     synced = await bot.tree.sync()
     print(f"Synced {len(synced)} global command(s)")
     if GUILD_ID:
         try:
             guild_obj = discord.Object(id=int(GUILD_ID.strip()))
+            bot.tree.clear_commands(guild=guild_obj)
             guild_synced = await bot.tree.sync(guild=guild_obj)
             print(f"Also synced {len(guild_synced)} guild command(s) — instant update!")
         except Exception as e:
