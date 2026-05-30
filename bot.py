@@ -56,8 +56,8 @@ def init_db() -> None:
         """
     )
 
-    for col in ["welcome_text", "welcome_banner_url", "welcome_theme", "verify_role_id",
-                "verify_message_id", "verify_channel_id", "verify_button_label",
+    for col in ["welcome_text", "welcome_banner_url", "welcome_theme", "welcome_thumbnail_url",
+                "verify_role_id", "verify_message_id", "verify_channel_id", "verify_button_label",
                 "verify_button_emoji", "verify_title", "verify_description",
                 "verify_color", "verify_image_url", "verify_thumbnail_url",
                 "verify_success_message", "verify_already_message",
@@ -149,6 +149,7 @@ def init_db() -> None:
 def upsert_settings(guild_id: int, **kwargs) -> None:
     allowed = {
         "welcome_channel_id", "welcome_banner_url", "welcome_theme", "welcome_text",
+        "welcome_thumbnail_url",
         "verify_role_id", "verify_message_id", "verify_channel_id", "verify_button_label",
         "verify_button_emoji", "verify_title", "verify_description", "verify_color",
         "verify_image_url", "verify_thumbnail_url", "verify_success_message",
@@ -540,7 +541,6 @@ async def on_ready():
             print(f"Guild sync skipped: {e}")
 
 
-
 @bot.event
 async def on_member_join(member: discord.Member):
     await asyncio.sleep(1)
@@ -551,7 +551,16 @@ async def on_member_join(member: discord.Member):
     if channel is None:
         return
     description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", member.mention).replace("\\n", "\n")
-    embed = build_embed(title=None, description=description, theme=settings["welcome_theme"] or "pink", image=settings["welcome_banner_url"], thumbnail=None, user_avatar_url=member.display_avatar.url)
+    # Use custom thumbnail if set, otherwise fall back to the member's avatar
+    thumb = settings["welcome_thumbnail_url"] if settings["welcome_thumbnail_url"] else None
+    embed = build_embed(
+        title=None,
+        description=description,
+        theme=settings["welcome_theme"] or "pink",
+        image=settings["welcome_banner_url"],
+        thumbnail=thumb,
+        user_avatar_url=member.display_avatar.url if not thumb else None,
+    )
     await channel.send(embed=embed)
 
 
@@ -757,35 +766,89 @@ async def embeddelete(interaction: discord.Interaction, name: str):
 
 @bot.tree.command(name="welcome_setup", description="Set up the welcome message")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(welcome_channel="Channel where welcome messages will be sent", welcome_text="Welcome message — use {mention} to tag the new member", color="Theme name or hex like #f7cfe3", banner_url="Big image URL at the bottom of the welcome embed")
-async def welcome_setup(interaction: discord.Interaction, welcome_channel: discord.TextChannel, welcome_text: str, color: str = "pink", banner_url: str | None = None):
+@app_commands.describe(
+    welcome_channel="Channel where welcome messages will be sent",
+    welcome_text="Welcome message — use {mention} to tag the new member",
+    color="Theme name or hex like #f7cfe3",
+    banner_url="Big image URL at the bottom of the welcome embed",
+    thumbnail_url="Small image top-right — leave blank to use the member's avatar instead",
+)
+async def welcome_setup(
+    interaction: discord.Interaction,
+    welcome_channel: discord.TextChannel,
+    welcome_text: str,
+    color: str = "pink",
+    banner_url: str | None = None,
+    thumbnail_url: str | None = None,
+):
     guild = guild_only(interaction)
-    kwargs = dict(welcome_channel_id=welcome_channel.id, welcome_text=welcome_text.replace("\\n", "\n"), welcome_theme=color)
-    if banner_url: kwargs["welcome_banner_url"] = banner_url
+    kwargs = dict(
+        welcome_channel_id=welcome_channel.id,
+        welcome_text=welcome_text.replace("\\n", "\n"),
+        welcome_theme=color,
+    )
+    if banner_url:
+        kwargs["welcome_banner_url"] = banner_url
+    # Store empty string to mean "use avatar"; store URL to mean "use this image"
+    if thumbnail_url is not None:
+        kwargs["welcome_thumbnail_url"] = thumbnail_url
     upsert_settings(guild.id, **kwargs)
-    preview = build_embed(title=None, description=welcome_text.replace("{mention}", interaction.user.mention), theme=color, image=banner_url, thumbnail=None, user_avatar_url=interaction.user.display_avatar.url)
+    thumb = thumbnail_url or None
+    preview = build_embed(
+        title=None,
+        description=welcome_text.replace("{mention}", interaction.user.mention),
+        theme=color,
+        image=banner_url,
+        thumbnail=thumb,
+        user_avatar_url=interaction.user.display_avatar.url if not thumb else None,
+    )
     await interaction.response.send_message("✅ Welcome message saved! Preview:", embed=preview, ephemeral=True)
 
 
 @bot.tree.command(name="welcome_edit", description="Edit the welcome message")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(welcome_text="New welcome text", color="New color — theme name or hex", banner_url="New banner image URL")
-async def welcome_edit(interaction: discord.Interaction, welcome_text: str | None = None, color: str | None = None, banner_url: str | None = None):
+@app_commands.describe(
+    welcome_text="New welcome text",
+    color="New color — theme name or hex",
+    banner_url="New banner image URL",
+    thumbnail_url="Small image top-right — paste a URL, or type 'none' to switch back to the member's avatar",
+)
+async def welcome_edit(
+    interaction: discord.Interaction,
+    welcome_text: str | None = None,
+    color: str | None = None,
+    banner_url: str | None = None,
+    thumbnail_url: str | None = None,
+):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
     if not settings or not settings["welcome_channel_id"]:
         await interaction.response.send_message("Run `/welcome_setup` first to set a channel.", ephemeral=True)
         return
     kwargs = {}
-    if welcome_text: kwargs["welcome_text"] = welcome_text
-    if color: kwargs["welcome_theme"] = color
-    if banner_url: kwargs["welcome_banner_url"] = banner_url
+    if welcome_text:
+        kwargs["welcome_text"] = welcome_text
+    if color:
+        kwargs["welcome_theme"] = color
+    if banner_url:
+        kwargs["welcome_banner_url"] = banner_url
+    if thumbnail_url is not None:
+        # "none" → clear the custom thumbnail (fall back to avatar)
+        kwargs["welcome_thumbnail_url"] = "" if thumbnail_url.lower() == "none" else thumbnail_url
     if not kwargs:
         await interaction.response.send_message("Please provide at least one field to update.", ephemeral=True)
         return
     upsert_settings(guild.id, **kwargs)
     updated = get_settings(guild.id)
-    preview = build_embed(title=None, description=(updated["welcome_text"] or "Welcome!").replace("{mention}", interaction.user.mention), theme=updated["welcome_theme"] or "pink", image=updated["welcome_banner_url"], thumbnail=None, user_avatar_url=interaction.user.display_avatar.url)
+    thumb = updated["welcome_thumbnail_url"] if updated["welcome_thumbnail_url"] else None
+    preview = build_embed(
+        title=None,
+        description=(updated["welcome_text"] or "Welcome!").replace("{mention}", interaction.user.mention),
+        theme=updated["welcome_theme"] or "pink",
+        image=updated["welcome_banner_url"],
+        thumbnail=thumb,
+        user_avatar_url=interaction.user.display_avatar.url if not thumb else None,
+    )
     await interaction.response.send_message("✅ Welcome message updated! Preview:", embed=preview, ephemeral=True)
 
 
@@ -798,7 +861,15 @@ async def welcome_test(interaction: discord.Interaction):
         await interaction.response.send_message("Run `/welcome_setup` first.", ephemeral=True)
         return
     description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", interaction.user.mention)
-    embed = build_embed(title=None, description=description, theme=settings["welcome_theme"] or "pink", image=settings["welcome_banner_url"], thumbnail=None, user_avatar_url=interaction.user.display_avatar.url)
+    thumb = settings["welcome_thumbnail_url"] if settings["welcome_thumbnail_url"] else None
+    embed = build_embed(
+        title=None,
+        description=description,
+        theme=settings["welcome_theme"] or "pink",
+        image=settings["welcome_banner_url"],
+        thumbnail=thumb,
+        user_avatar_url=interaction.user.display_avatar.url if not thumb else None,
+    )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
