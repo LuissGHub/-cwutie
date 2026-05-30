@@ -281,12 +281,28 @@ def get_waitlist_key(guild_id: int):
     return str(guild_id)
 
 
-def build_waitlist_embed(guild, title, channel_ids, color="pink"):
+# ── Waitlist entry helpers ──
+# Entries are stored as either a plain string (legacy) or {"id": "...", "label": "..."}
+
+def entry_id(entry) -> str:
+    return entry["id"] if isinstance(entry, dict) else entry
+
+
+def entry_label(entry) -> str | None:
+    return entry.get("label") if isinstance(entry, dict) else None
+
+
+def build_waitlist_embed(guild, title, entries, color="pink"):
     lines = []
-    for i, channel_id in enumerate(channel_ids, start=1):
-        channel = guild.get_channel(int(channel_id))
+    for i, entry in enumerate(entries, start=1):
+        cid = entry_id(entry)
+        label = entry_label(entry)
+        channel = guild.get_channel(int(cid))
         if channel:
-            lines.append(f"{i}) <#{channel.id}>")
+            line = f"{i}) <#{channel.id}>"
+            if label:
+                line += f" {label}"
+            lines.append(line)
     description = "\n".join(lines) if lines else "*No orders in the waitlist yet.*"
     return discord.Embed(title=title, description=description, color=get_theme_color(color))
 
@@ -318,7 +334,6 @@ async def update_waitlist_message(bot, guild_id: int):
 def check_trigger(content_lower: str, trigger: str, match_type: str) -> bool:
     if match_type == "anywhere":
         return trigger in content_lower
-    # exact: must have the dot prefix
     return content_lower == f".{trigger}"
 
 
@@ -501,23 +516,24 @@ class WaitlistRemoveSelect(discord.ui.Select):
         data = load_waitlists()
         key = get_waitlist_key(interaction.guild.id)
         cid = self.values[0]
-        if cid in data[key]["users"]:
-            data[key]["users"].remove(cid)
-            save_waitlists(data)
-            await update_waitlist_message(bot, interaction.guild.id)
-            await interaction.response.edit_message(content="✅ Removed from the waitlist.", view=None)
-        else:
-            await interaction.response.edit_message(content="❌ That entry wasn't found.", view=None)
+        data[key]["users"] = [e for e in data[key]["users"] if entry_id(e) != cid]
+        save_waitlists(data)
+        await update_waitlist_message(bot, interaction.guild.id)
+        await interaction.response.edit_message(content="✅ Removed from the waitlist.", view=None)
 
 
 class WaitlistRemoveView(discord.ui.View):
-    def __init__(self, guild: discord.Guild, entries: list[str]):
+    def __init__(self, guild: discord.Guild, entries: list):
         super().__init__(timeout=60)
         options = []
-        for cid in entries:
+        for e in entries:
+            cid = entry_id(e)
+            label = entry_label(e)
             channel = guild.get_channel(int(cid))
-            label = f"#{channel.name}" if channel else f"unknown ({cid})"
-            options.append(discord.SelectOption(label=label, value=cid))
+            display = f"#{channel.name}" if channel else f"unknown ({cid})"
+            if label:
+                display += f" — {label}"
+            options.append(discord.SelectOption(label=display[:100], value=cid))
         self.add_item(WaitlistRemoveSelect(options))
 
 
@@ -551,7 +567,6 @@ async def on_member_join(member: discord.Member):
     if channel is None:
         return
     description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", member.mention).replace("\\n", "\n")
-    # Use custom thumbnail if set, otherwise fall back to the member's avatar
     thumb = settings["welcome_thumbnail_url"] if settings["welcome_thumbnail_url"] else None
     embed = build_embed(
         title=None,
@@ -789,7 +804,6 @@ async def welcome_setup(
     )
     if banner_url:
         kwargs["welcome_banner_url"] = banner_url
-    # Store empty string to mean "use avatar"; store URL to mean "use this image"
     if thumbnail_url is not None:
         kwargs["welcome_thumbnail_url"] = thumbnail_url
     upsert_settings(guild.id, **kwargs)
@@ -833,7 +847,6 @@ async def welcome_edit(
     if banner_url:
         kwargs["welcome_banner_url"] = banner_url
     if thumbnail_url is not None:
-        # "none" → clear the custom thumbnail (fall back to avatar)
         kwargs["welcome_thumbnail_url"] = "" if thumbnail_url.lower() == "none" else thumbnail_url
     if not kwargs:
         await interaction.response.send_message("Please provide at least one field to update.", ephemeral=True)
@@ -1244,21 +1257,47 @@ async def waitlist_create(interaction: discord.Interaction, title: str | None = 
 
 
 @bot.tree.command(name="waitlist_add", description="Add a channel to the waitlist")
-@app_commands.describe(channel="Order channel to add")
-async def waitlist_add(interaction: discord.Interaction, channel: discord.TextChannel):
+@app_commands.describe(channel="Order channel to add", label="Optional label e.g. texturing, 0/2 modeling")
+async def waitlist_add(interaction: discord.Interaction, channel: discord.TextChannel, label: str | None = None):
     data = load_waitlists()
     key = get_waitlist_key(interaction.guild.id)
     if key not in data:
         await interaction.response.send_message("Run /waitlist_create first.", ephemeral=True)
         return
     cid = str(channel.id)
-    if cid in data[key]["users"]:
+    if any(entry_id(e) == cid for e in data[key]["users"]):
         await interaction.response.send_message("That channel is already in the waitlist.", ephemeral=True)
         return
-    data[key]["users"].append(cid)
+    entry = {"id": cid, "label": label} if label else cid
+    data[key]["users"].append(entry)
     save_waitlists(data)
     await update_waitlist_message(bot, interaction.guild.id)
-    await interaction.response.send_message(f"Added {channel.mention}", ephemeral=True)
+    suffix = f" — {label}" if label else ""
+    await interaction.response.send_message(f"✅ Added {channel.mention}{suffix}", ephemeral=True)
+
+
+@bot.tree.command(name="waitlist_label", description="Set or update the label on a waitlist entry")
+@app_commands.describe(channel="The order channel to update", label="New label e.g. 1/2 texturing — leave blank to clear it")
+async def waitlist_label(interaction: discord.Interaction, channel: discord.TextChannel, label: str | None = None):
+    data = load_waitlists()
+    key = get_waitlist_key(interaction.guild.id)
+    if key not in data:
+        await interaction.response.send_message("No waitlist found. Run /waitlist_create first.", ephemeral=True)
+        return
+    cid = str(channel.id)
+    entries = data[key]["users"]
+    for i, e in enumerate(entries):
+        if entry_id(e) == cid:
+            if label:
+                entries[i] = {"id": cid, "label": label}
+            else:
+                entries[i] = cid  # clear label, revert to plain string
+            save_waitlists(data)
+            await update_waitlist_message(bot, interaction.guild.id)
+            msg = f"✅ Updated label for {channel.mention} → **{label}**" if label else f"✅ Cleared label for {channel.mention}"
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
+    await interaction.response.send_message(f"{channel.mention} isn't in the waitlist.", ephemeral=True)
 
 
 @bot.tree.command(name="waitlist_remove", description="Remove a channel from the waitlist")
