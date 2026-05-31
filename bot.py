@@ -833,6 +833,9 @@ async def welcome_setup(
         user_avatar_url=interaction.user.display_avatar.url if not thumb else None,
     )
     await interaction.response.send_message("✅ Welcome message saved! Preview:", embed=preview, ephemeral=True)
+    if banner2_url:
+        embed2 = build_embed(title=None, description=None, theme=color, image=banner2_url)
+        await interaction.followup.send(embed=embed2, ephemeral=True)
 
 
 @bot.tree.command(name="welcome_edit", description="Edit the welcome message")
@@ -882,6 +885,14 @@ async def welcome_edit(
         user_avatar_url=interaction.user.display_avatar.url if not thumb else None,
     )
     await interaction.response.send_message("✅ Welcome message updated! Preview:", embed=preview, ephemeral=True)
+    # Show second banner in preview if set
+    if updated["welcome_banner2_url"]:
+        embed2 = build_embed(
+            title=None, description=None,
+            theme=updated["welcome_theme"] or "pink",
+            image=updated["welcome_banner2_url"],
+        )
+        await interaction.followup.send(embed=embed2, ephemeral=True)
 
 
 @bot.tree.command(name="welcome_test", description="Preview the welcome embed (only visible to you)")
@@ -903,6 +914,14 @@ async def welcome_test(interaction: discord.Interaction):
         user_avatar_url=interaction.user.display_avatar.url if not thumb else None,
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
+    # Also show second banner if set
+    if settings["welcome_banner2_url"]:
+        embed2 = build_embed(
+            title=None, description=None,
+            theme=settings["welcome_theme"] or "pink",
+            image=settings["welcome_banner2_url"],
+        )
+        await interaction.followup.send(embed=embed2, ephemeral=True)
 
 
 @bot.tree.command(name="themes", description="Show available embed colors")
