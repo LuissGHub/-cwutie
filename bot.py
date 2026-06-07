@@ -885,7 +885,6 @@ async def welcome_edit(
         user_avatar_url=interaction.user.display_avatar.url if not thumb else None,
     )
     await interaction.response.send_message("✅ Welcome message updated! Preview:", embed=preview, ephemeral=True)
-    # Show second banner in preview if set
     if updated["welcome_banner2_url"]:
         embed2 = build_embed(
             title=None, description=None,
@@ -914,7 +913,6 @@ async def welcome_test(interaction: discord.Interaction):
         user_avatar_url=interaction.user.display_avatar.url if not thumb else None,
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
-    # Also show second banner if set
     if settings["welcome_banner2_url"]:
         embed2 = build_embed(
             title=None, description=None,
@@ -1329,7 +1327,7 @@ async def waitlist_label(interaction: discord.Interaction, channel: discord.Text
             if label:
                 entries[i] = {"id": cid, "label": label}
             else:
-                entries[i] = cid  # clear label, revert to plain string
+                entries[i] = cid
             save_waitlists(data)
             await update_waitlist_message(bot, interaction.guild.id)
             msg = f"✅ Updated label for {channel.mention} → **{label}**" if label else f"✅ Cleared label for {channel.mention}"
@@ -1349,6 +1347,27 @@ async def waitlist_remove(interaction: discord.Interaction):
     view = WaitlistRemoveView(interaction.guild, data[key]["users"])
     await interaction.response.send_message("Select a channel to remove:", view=view, ephemeral=True)
 
+
+# ———————————————––
+# Commands — Roblox Tax Calculator
+# ———————————————––
+
+roblox_group = app_commands.Group(name="roblox", description="Roblox utilities")
+
+@roblox_group.command(name="calctax", description="Calculate Roblox marketplace tax")
+@app_commands.describe(amount="The Robux amount to calculate tax for")
+async def roblox_calctax(interaction: discord.Interaction, amount: int):
+    after_tax = round(amount * 0.70)
+    to_cover_tax = round(amount / 0.70)
+
+    embed = discord.Embed(color=get_theme_color("pink"))
+    embed.add_field(name="Initial amount", value=f"{amount} 🔸", inline=False)
+    embed.add_field(name="After Roblox tax (30%)", value=f"{after_tax} 🔸", inline=False)
+    embed.add_field(name="Total cost to cover tax", value=f"{to_cover_tax} 🔸", inline=False)
+
+    await interaction.response.send_message(embed=embed)
+
+bot.tree.add_command(roblox_group)
 
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable is not set")
