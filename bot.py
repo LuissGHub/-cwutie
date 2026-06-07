@@ -1361,9 +1361,9 @@ async def roblox_calctax(interaction: discord.Interaction, amount: int):
     to_cover_tax = round(amount / 0.70)
 
     embed = discord.Embed(color=get_theme_color("pink"))
-    embed.add_field(name="Initial amount", value=f"{amount} 🔸", inline=False)
-    embed.add_field(name="After Roblox tax (30%)", value=f"{after_tax} 🔸", inline=False)
-    embed.add_field(name="Total cost to cover tax", value=f"{to_cover_tax} 🔸", inline=False)
+    embed.add_field(name="Initial amount", value=f"{amount} <:001_roblox_DNS:1501267296511856712>", inline=False)
+    embed.add_field(name="After Roblox tax (30%)", value=f"{after_tax} <:001_roblox_DNS:1501267296511856712>", inline=False)
+    embed.add_field(name="Total cost to cover tax", value=f"{to_cover_tax} <:001_roblox_DNS:1501267296511856712>", inline=False)
 
     await interaction.response.send_message(embed=embed)
 
