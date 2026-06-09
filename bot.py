@@ -548,21 +548,55 @@ class WaitlistRemoveView(discord.ui.View):
         self.add_item(WaitlistRemoveSelect(options))
 
 
+class WaitlistMovePickSelect(discord.ui.Select):
+    """Step 1 — pick which entry to move."""
+    def __init__(self, entries: list, guild: discord.Guild):
+        self.entries = entries
+        self.guild = guild
+        options = []
+        for i, e in enumerate(entries, start=1):
+            cid = entry_id(e)
+            lbl = entry_label(e)
+            ch = guild.get_channel(int(cid))
+            ch_name = f"#{ch.name}" if ch else f"unknown ({cid})"
+            suffix = f" — {lbl}" if lbl else ""
+            options.append(discord.SelectOption(label=f"{i}) {ch_name}{suffix}"[:100], value=cid))
+        super().__init__(placeholder="Pick an entry to move...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        cid = self.values[0]
+        data = load_waitlists()
+        key = get_waitlist_key(interaction.guild.id)
+        entries = data[key]["users"]
+        view = WaitlistMovePositionView(cid, entries, interaction.guild)
+        ch = interaction.guild.get_channel(int(cid))
+        ch_mention = ch.mention if ch else f"<#{cid}>"
+        await interaction.response.edit_message(content=f"Where should {ch_mention} go?", view=view)
+
+
+class WaitlistMovePickView(discord.ui.View):
+    def __init__(self, entries: list, guild: discord.Guild):
+        super().__init__(timeout=60)
+        self.add_item(WaitlistMovePickSelect(entries, guild))
+
+
 class WaitlistMovePositionSelect(discord.ui.Select):
+    """Step 2 — pick the new slot."""
     def __init__(self, channel_id: str, entries: list, guild: discord.Guild):
         self.channel_id = channel_id
-        self.entries = entries
-        total = len(entries)
         options = []
-        for i in range(1, total + 1):
+        for i in range(1, len(entries) + 1):
             e = entries[i - 1]
             cid = entry_id(e)
             lbl = entry_label(e)
             ch = guild.get_channel(int(cid))
             ch_name = f"#{ch.name}" if ch else f"unknown ({cid})"
             suffix = f" — {lbl}" if lbl else ""
-            desc = f"Currently slot {i}: {ch_name}{suffix}"
-            options.append(discord.SelectOption(label=f"Move to slot {i}", description=desc[:100], value=str(i)))
+            options.append(discord.SelectOption(
+                label=f"Slot {i}",
+                description=f"Currently: {ch_name}{suffix}"[:100],
+                value=str(i),
+            ))
         super().__init__(placeholder="Pick the new position...", options=options)
 
     async def callback(self, interaction: discord.Interaction):
@@ -570,7 +604,6 @@ class WaitlistMovePositionSelect(discord.ui.Select):
         key = get_waitlist_key(interaction.guild.id)
         entries = data[key]["users"]
 
-        # Find and remove the entry being moved
         target = None
         new_entries = []
         for e in entries:
@@ -583,8 +616,7 @@ class WaitlistMovePositionSelect(discord.ui.Select):
             await interaction.response.edit_message(content="❌ Entry not found.", view=None)
             return
 
-        new_pos = int(self.values[0]) - 1  # 0-indexed
-        new_pos = max(0, min(new_pos, len(new_entries)))
+        new_pos = max(0, min(int(self.values[0]) - 1, len(new_entries)))
         new_entries.insert(new_pos, target)
         data[key]["users"] = new_entries
         save_waitlists(data)
@@ -594,7 +626,7 @@ class WaitlistMovePositionSelect(discord.ui.Select):
         await interaction.response.edit_message(content=f"✅ Moved {ch_mention} to slot {self.values[0]}.", view=None)
 
 
-class WaitlistMoveView(discord.ui.View):
+class WaitlistMovePositionView(discord.ui.View):
     def __init__(self, channel_id: str, entries: list, guild: discord.Guild):
         super().__init__(timeout=60)
         self.add_item(WaitlistMovePositionSelect(channel_id, entries, guild))
@@ -1405,23 +1437,18 @@ async def waitlist_remove(interaction: discord.Interaction):
 
 @bot.tree.command(name="waitlist_move", description="Reorder an entry in the waitlist")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(channel="The order channel to move")
-async def waitlist_move(interaction: discord.Interaction, channel: discord.TextChannel):
+async def waitlist_move(interaction: discord.Interaction):
     data = load_waitlists()
     key = get_waitlist_key(interaction.guild.id)
     if key not in data or not data[key]["users"]:
         await interaction.response.send_message("The waitlist is empty.", ephemeral=True)
         return
-    cid = str(channel.id)
-    if not any(entry_id(e) == cid for e in data[key]["users"]):
-        await interaction.response.send_message(f"{channel.mention} isn't in the waitlist.", ephemeral=True)
-        return
     entries = data[key]["users"]
     if len(entries) < 2:
         await interaction.response.send_message("Only one entry in the waitlist — nothing to reorder.", ephemeral=True)
         return
-    view = WaitlistMoveView(cid, entries, interaction.guild)
-    await interaction.response.send_message(f"Where should {channel.mention} go?", view=view, ephemeral=True)
+    view = WaitlistMovePickView(entries, interaction.guild)
+    await interaction.response.send_message("Pick an entry to move:", view=view, ephemeral=True)
 
 
 # ———————————————––
