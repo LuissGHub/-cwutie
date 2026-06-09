@@ -17,7 +17,9 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = os.getenv("GUILD_ID")
 _data_dir = Path("/data") if Path("/data").exists() else Path(".")
 DB_PATH = _data_dir / "bot.db"
+WAITLIST_FILE = str(_data_dir / "waitlists.json")
 print("DB PATH:", DB_PATH)
+print("WAITLIST FILE:", WAITLIST_FILE)
 
 intents = discord.Intents.default()
 intents.members = True
@@ -262,8 +264,9 @@ def parse_emoji(value: str | None):
     return value.strip()
 
 
-WAITLIST_FILE = "waitlists.json"
-
+# ———————————————––
+# Waitlist helpers
+# ———————————————––
 
 def load_waitlists():
     try:
@@ -543,6 +546,58 @@ class WaitlistRemoveView(discord.ui.View):
                 display += f" — {label}"
             options.append(discord.SelectOption(label=display[:100], value=cid))
         self.add_item(WaitlistRemoveSelect(options))
+
+
+class WaitlistMovePositionSelect(discord.ui.Select):
+    def __init__(self, channel_id: str, entries: list, guild: discord.Guild):
+        self.channel_id = channel_id
+        self.entries = entries
+        total = len(entries)
+        options = []
+        for i in range(1, total + 1):
+            e = entries[i - 1]
+            cid = entry_id(e)
+            lbl = entry_label(e)
+            ch = guild.get_channel(int(cid))
+            ch_name = f"#{ch.name}" if ch else f"unknown ({cid})"
+            suffix = f" — {lbl}" if lbl else ""
+            desc = f"Currently slot {i}: {ch_name}{suffix}"
+            options.append(discord.SelectOption(label=f"Move to slot {i}", description=desc[:100], value=str(i)))
+        super().__init__(placeholder="Pick the new position...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        data = load_waitlists()
+        key = get_waitlist_key(interaction.guild.id)
+        entries = data[key]["users"]
+
+        # Find and remove the entry being moved
+        target = None
+        new_entries = []
+        for e in entries:
+            if entry_id(e) == self.channel_id:
+                target = e
+            else:
+                new_entries.append(e)
+
+        if target is None:
+            await interaction.response.edit_message(content="❌ Entry not found.", view=None)
+            return
+
+        new_pos = int(self.values[0]) - 1  # 0-indexed
+        new_pos = max(0, min(new_pos, len(new_entries)))
+        new_entries.insert(new_pos, target)
+        data[key]["users"] = new_entries
+        save_waitlists(data)
+        await update_waitlist_message(bot, interaction.guild.id)
+        ch = interaction.guild.get_channel(int(self.channel_id))
+        ch_mention = ch.mention if ch else f"<#{self.channel_id}>"
+        await interaction.response.edit_message(content=f"✅ Moved {ch_mention} to slot {self.values[0]}.", view=None)
+
+
+class WaitlistMoveView(discord.ui.View):
+    def __init__(self, channel_id: str, entries: list, guild: discord.Guild):
+        super().__init__(timeout=60)
+        self.add_item(WaitlistMovePositionSelect(channel_id, entries, guild))
 
 
 # ———————————————––
@@ -1348,6 +1403,27 @@ async def waitlist_remove(interaction: discord.Interaction):
     await interaction.response.send_message("Select a channel to remove:", view=view, ephemeral=True)
 
 
+@bot.tree.command(name="waitlist_move", description="Reorder an entry in the waitlist")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(channel="The order channel to move")
+async def waitlist_move(interaction: discord.Interaction, channel: discord.TextChannel):
+    data = load_waitlists()
+    key = get_waitlist_key(interaction.guild.id)
+    if key not in data or not data[key]["users"]:
+        await interaction.response.send_message("The waitlist is empty.", ephemeral=True)
+        return
+    cid = str(channel.id)
+    if not any(entry_id(e) == cid for e in data[key]["users"]):
+        await interaction.response.send_message(f"{channel.mention} isn't in the waitlist.", ephemeral=True)
+        return
+    entries = data[key]["users"]
+    if len(entries) < 2:
+        await interaction.response.send_message("Only one entry in the waitlist — nothing to reorder.", ephemeral=True)
+        return
+    view = WaitlistMoveView(cid, entries, interaction.guild)
+    await interaction.response.send_message(f"Where should {channel.mention} go?", view=view, ephemeral=True)
+
+
 # ———————————————––
 # Commands — Roblox Tax Calculator
 # ———————————————––
@@ -1355,13 +1431,21 @@ async def waitlist_remove(interaction: discord.Interaction):
 roblox_group = app_commands.Group(name="roblox", description="Roblox utilities")
 
 @roblox_group.command(name="calctax", description="Calculate Roblox marketplace tax")
-@app_commands.describe(amount="The Robux amount to calculate tax for")
-async def roblox_calctax(interaction: discord.Interaction, amount: int):
-    after_tax = round(amount * 0.70)
-    to_cover_tax = round(amount / 0.70)
+@app_commands.describe(amount="The Robux amount to calculate tax for", discount="Apply 10% discount to the amount first")
+async def roblox_calctax(interaction: discord.Interaction, amount: int, discount: bool = False):
+    display_amount = amount
+    if discount:
+        display_amount = round(amount * 0.90)
+
+    after_tax = round(display_amount * 0.70)
+    to_cover_tax = round(display_amount / 0.70)
 
     embed = discord.Embed(color=get_theme_color("pink"))
-    embed.add_field(name="Initial amount", value=f"{amount} <:001_roblox_DNS:1501267296511856712>", inline=False)
+    if discount:
+        embed.add_field(name="Original amount", value=f"{amount} <:001_roblox_DNS:1501267296511856712>", inline=False)
+        embed.add_field(name="After 10% discount", value=f"{display_amount} <:001_roblox_DNS:1501267296511856712>", inline=False)
+    else:
+        embed.add_field(name="Initial amount", value=f"{amount} <:001_roblox_DNS:1501267296511856712>", inline=False)
     embed.add_field(name="After Roblox tax (30%)", value=f"{after_tax} <:001_roblox_DNS:1501267296511856712>", inline=False)
     embed.add_field(name="Total cost to cover tax", value=f"{to_cover_tax} <:001_roblox_DNS:1501267296511856712>", inline=False)
 
