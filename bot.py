@@ -1507,22 +1507,30 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
         )
         return
 
-    # Fetch Roblox user ID from username
     await interaction.response.defer()
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "https://users.roblox.com/v1/usernames/users",
-            json={"usernames": [target], "excludeBannedUsers": False}
-        ) as resp:
-            data = await resp.json()
-            users = data.get("data", [])
-            if not users:
-                await interaction.followup.send(
-                    f"❌ Couldn't find Roblox user `{target}`.",
-                    ephemeral=True
-                )
-                return
-            user_id = users[0]["id"]
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://users.roblox.com/v1/usernames/users",
+                json={"usernames": [target], "excludeBannedUsers": False},
+                timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                data = await resp.json()
+                users = data.get("data", [])
+                if not users:
+                    await interaction.followup.send(
+                        f"❌ Couldn't find Roblox user `{target}`.",
+                        ephemeral=True
+                    )
+                    return
+                user_id = users[0]["id"]
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Failed to fetch user ID: `{e}`",
+            ephemeral=True
+        )
+        return
 
     join_link = f"https://www.roblox.com/games/{place_id}?referrerId={user_id}&referrerType=Player"
     game_page = f"https://www.roblox.com/games/{place_id}"
