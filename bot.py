@@ -1489,13 +1489,13 @@ ROBLOX_GAMES = {
     # add more here later: "gamename": "placeid",
 }
 
-@bot.tree.command(name="snipe", description="Join a player's exact Roblox server")
+@bot.tree.command(name="snipe", description="Find and join a player's exact Roblox server")
 @app_commands.describe(
     target="Roblox username of the player to snipe",
     game="Game name (e.g. baddies) or Place ID"
 )
 async def snipe(interaction: discord.Interaction, target: str, game: str):
-    # Resolve game name or URL to place ID
+    # Resolve game name/URL/ID to place ID
     place_id = None
 
     if game.lower() in ROBLOX_GAMES:
@@ -1518,6 +1518,7 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
 
     await interaction.response.defer()
 
+    # Step 1: Get user ID from username
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -1535,26 +1536,115 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                     return
                 user_id = users[0]["id"]
     except Exception as e:
-        await interaction.followup.send(
-            f"❌ Failed to fetch user ID: `{e}`",
-            ephemeral=True
+        await interaction.followup.send(f"❌ Failed to fetch user ID: `{e}`", ephemeral=True)
+        return
+
+    # Step 2: Get player token to identify them in server lists
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"https://games.roblox.com/v1/games/{place_id}/servers/Public?limit=100",
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                pass  # just checking connectivity
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to reach Roblox servers: `{e}`", ephemeral=True)
+        return
+
+    # Step 3: Scan servers for the target
+    await interaction.followup.send(
+        f"🔍 Scanning servers for **{target}**... this may take a moment.",
+        ephemeral=False
+    )
+
+    found_server_id = None
+    cursor = ""
+    scanned = 0
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            url = f"https://games.roblox.com/v1/games/{place_id}/servers/Public?limit=100&sortOrder=Asc"
+            if cursor:
+                url += f"&cursor={cursor}"
+
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        break
+                    data = await resp.json()
+            except Exception:
+                break
+
+            servers = data.get("data", [])
+            scanned += len(servers)
+
+            for server in servers:
+                player_tokens = server.get("playerTokens", [])
+
+                # Check each token against the target user
+                if not player_tokens:
+                    continue
+
+                token_check_url = "https://thumbnails.roblox.com/v1/batch"
+                token_requests = [
+                    {
+                        "requestId": f"{user_id}:undefined:{server['id']}:{place_id}:Avatar:150x150",
+                        "type": "AvatarHeadShot",
+                        "targetId": 0,
+                        "token": token,
+                        "format": "png",
+                        "size": "150x150"
+                    }
+                    for token in player_tokens
+                ]
+
+                try:
+                    async with session.post(
+                        token_check_url,
+                        json=token_requests,
+                        timeout=aiohttp.ClientTimeout(total=10)
+                    ) as token_resp:
+                        token_data = await token_resp.json()
+                        results = token_data.get("data", [])
+                        for result in results:
+                            if str(user_id) in str(result.get("requestId", "")):
+                                if result.get("state") == "Completed":
+                                    found_server_id = server["id"]
+                                    break
+                except Exception:
+                    continue
+
+                if found_server_id:
+                    break
+
+            if found_server_id:
+                break
+
+            cursor = data.get("nextPageCursor")
+            if not cursor:
+                break
+
+    if not found_server_id:
+        await interaction.channel.send(
+            f"❌ Could not find **{target}** in any public server of that game. They may be in a private server or have joins off."
         )
         return
 
-    deep_link = f"roblox://experiences/start?placeId={place_id}&userId={user_id}"
-    game_page = f"https://www.roblox.com/games/{place_id}"
+    join_link = f"roblox://experiences/start?placeId={place_id}&gameInstanceId={found_server_id}"
     profile_url = f"https://www.roblox.com/users/{user_id}/profile"
+    game_page = f"https://www.roblox.com/games/{place_id}"
 
     embed = discord.Embed(
-        title="🎯 Snipe Target",
-        description=f"Copy the link below and paste it in your browser to join their server!",
-        color=discord.Color.red()
+        title="🎯 Target Found!",
+        description=f"Copy the join link below and paste it in your browser!",
+        color=discord.Color.green()
     )
     embed.add_field(name="Target", value=f"[{target}]({profile_url})", inline=True)
     embed.add_field(name="Game", value=f"[View Page]({game_page})", inline=True)
-    embed.add_field(name="Join Link", value=f"`{deep_link}`", inline=False)
+    embed.add_field(name="Servers Scanned", value=str(scanned), inline=True)
+    embed.add_field(name="Join Link", value=f"`{join_link}`", inline=False)
     embed.set_footer(text=f"Requested by {interaction.user.display_name}")
 
-    await interaction.followup.send(embed=embed)
+    await interaction.channel.send(embed=embed)
     
 bot.run(TOKEN)
