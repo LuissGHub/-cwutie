@@ -1550,13 +1550,16 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
             try:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status != 200:
+                        print(f"[DEBUG] Server list status: {resp.status}")
                         break
                     data = await resp.json()
-            except Exception:
+            except Exception as e:
+                print(f"[DEBUG] Server list exception: {e}")
                 break
 
             servers = data.get("data", [])
             scanned += len(servers)
+            print(f"[DEBUG] Scanning {len(servers)} servers (total so far: {scanned})")
 
             for server in servers:
                 player_tokens = server.get("playerTokens", [])
@@ -1582,16 +1585,17 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                         timeout=aiohttp.ClientTimeout(total=10)
                     ) as token_resp:
                         token_data = await token_resp.json()
+                        print(f"[DEBUG] Batch status: {token_resp.status}")
+                        print(f"[DEBUG] Batch raw response: {token_data}")
                         results = token_data.get("data", [])
-                        print(f"[DEBUG] Batch results for server {server['id']}: {results[:2]}")
+                        print(f"[DEBUG] Batch results count: {len(results)}")
                         for result in results:
                             img_url = result.get("imageUrl", "")
-                            print(f"[DEBUG] Token imageUrl: {img_url}")
-                            print(f"[DEBUG] Target URL:     {target_thumb_url}")
                             if target_thumb_url and img_url == target_thumb_url:
                                 found_server_id = server["id"]
                                 break
-                except Exception:
+                except Exception as e:
+                    print(f"[DEBUG] Batch API exception: {e}")
                     continue
 
                 if found_server_id:
