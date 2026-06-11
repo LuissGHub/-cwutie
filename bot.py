@@ -1547,20 +1547,19 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
     async with aiohttp.ClientSession() as session:
         while True:
             # Rate limit: pause every 3 pages to avoid 429s
-            if page > 0 and page % 3 == 0:
-                await asyncio.sleep(1.5)
+        if page > 0 and page % 2 == 0:
+                await asyncio.sleep(2.0)
 
             url = f"https://games.roblox.com/v1/games/{place_id}/servers/Public?limit=100&sortOrder=Asc"
             if cursor:
                 url += f"&cursor={cursor}"
 
             try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status == 429:
-                        retry_after = int(resp.headers.get("Retry-After", 5))
-                        print(f"[DEBUG] 429 on server list — waiting {retry_after}s")
-                        await asyncio.sleep(retry_after)
-                        continue
+                if resp.status == 429:
+    retry_after = int(resp.headers.get("Retry-After", 0)) or 10
+    print(f"[DEBUG] 429 on server list — waiting {retry_after}s")
+    await asyncio.sleep(retry_after)
+    continue
                     if resp.status != 200:
                         print(f"[DEBUG] Server list status: {resp.status}")
                         break
@@ -1576,6 +1575,7 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
 
             for server in servers:
                 player_tokens = server.get("playerTokens", [])
+                print(f"[DEBUG] Server {server['id']} — playerTokens count: {len(player_tokens)}")
                 if not player_tokens:
                     continue
 
