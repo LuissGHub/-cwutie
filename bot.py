@@ -1499,7 +1499,7 @@ ROBLOX_GAMES = {
     for name, place_id in ROBLOX_GAMES.items()
 ])
 async def snipe(interaction: discord.Interaction, target: str, game: str):
-    place_id = game  # game is now directly the place ID from choices
+    place_id = game
 
     await interaction.response.defer()
 
@@ -1530,7 +1530,9 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
             ) as resp:
                 thumb_data = await resp.json()
                 target_thumb_url = thumb_data["data"][0]["imageUrl"] if thumb_data.get("data") else None
-    except Exception:
+                print(f"[DEBUG] Target thumbnail URL: {target_thumb_url}")
+    except Exception as e:
+        print(f"[DEBUG] Failed to get thumbnail: {e}")
         target_thumb_url = None
 
     await interaction.followup.send(f"🔍 Scanning servers for **{target}**... this may take a moment.")
@@ -1561,7 +1563,6 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                 if not player_tokens:
                     continue
 
-                # Resolve player tokens to thumbnail URLs via batch API
                 token_requests = [
                     {
                         "requestId": f"{place_id}:{token}:AvatarHeadshot:150x150:png:regular",
@@ -1584,6 +1585,8 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                         results = token_data.get("data", [])
                         for result in results:
                             img_url = result.get("imageUrl", "")
+                            print(f"[DEBUG] Token imageUrl: {img_url}")
+                            print(f"[DEBUG] Target URL:     {target_thumb_url}")
                             if target_thumb_url and img_url == target_thumb_url:
                                 found_server_id = server["id"]
                                 break
