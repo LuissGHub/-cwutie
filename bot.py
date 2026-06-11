@@ -1483,4 +1483,45 @@ bot.tree.add_command(roblox_group)
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable is not set")
 
+@bot.tree.command(name="snipe", description="Join a player's Roblox game instantly")
+@app_commands.describe(
+    target="Roblox username of the player to snipe",
+    game="Game Link or Place ID"
+)
+async def snipe(interaction: discord.Interaction, target: str, game: str):
+    # Extract place ID from URL or use directly if it's already an ID
+    place_id = None
+
+    if game.startswith("http"):
+        # e.g. https://www.roblox.com/games/123456789/game-name
+        parts = game.split("/")
+        for i, part in enumerate(parts):
+            if part == "games" and i + 1 < len(parts):
+                place_id = parts[i + 1].split("?")[0]
+                break
+    elif game.isdigit():
+        place_id = game
+
+    if not place_id:
+        await interaction.response.send_message(
+            "❌ Please provide a valid Roblox game URL or Place ID.",
+            ephemeral=True
+        )
+        return
+
+    deep_link = f"roblox://experiences/start?placeId={place_id}"
+    game_page = f"https://www.roblox.com/games/{place_id}"
+    profile_url = f"https://www.roblox.com/users/profile?username={target}"
+
+    embed = discord.Embed(
+        title="🎯 Snipe Target",
+        description=f"Click **[Join Game]({deep_link})** to snipe them!",
+        color=discord.Color.red()
+    )
+    embed.add_field(name="Target", value=f"[{target}]({profile_url})", inline=True)
+    embed.add_field(name="Game", value=f"[View Page]({game_page})", inline=True)
+    embed.set_footer(text=f"Requested by {interaction.user.display_name}")
+
+    await interaction.response.send_message(embed=embed)
+    
 bot.run(TOKEN)
