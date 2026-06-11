@@ -1485,36 +1485,21 @@ if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable is not set")
 
 ROBLOX_GAMES = {
-    "baddies": "11158043705",
-    # add more here later: "gamename": "placeid",
+    "Baddies": "11158043705",
+    # add more here later
 }
 
 @bot.tree.command(name="snipe", description="Find and join a player's exact Roblox server")
 @app_commands.describe(
     target="Roblox username of the player to snipe",
-    game="Game name (e.g. baddies) or Place ID"
+    game="Select a game"
 )
+@app_commands.choices(game=[
+    app_commands.Choice(name=name, value=place_id)
+    for name, place_id in ROBLOX_GAMES.items()
+])
 async def snipe(interaction: discord.Interaction, target: str, game: str):
-    # Resolve game name/URL/ID to place ID
-    place_id = None
-
-    if game.lower() in ROBLOX_GAMES:
-        place_id = ROBLOX_GAMES[game.lower()]
-    elif game.startswith("http"):
-        parts = game.split("/")
-        for i, part in enumerate(parts):
-            if part == "games" and i + 1 < len(parts):
-                place_id = parts[i + 1].split("?")[0]
-                break
-    elif game.isdigit():
-        place_id = game
-
-    if not place_id:
-        await interaction.response.send_message(
-            "❌ Please provide a valid game name, Roblox game URL, or Place ID.",
-            ephemeral=True
-        )
-        return
+    place_id = game  # game is now directly the place ID from choices
 
     await interaction.response.defer()
 
@@ -1529,33 +1514,26 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                 data = await resp.json()
                 users = data.get("data", [])
                 if not users:
-                    await interaction.followup.send(
-                        f"❌ Couldn't find Roblox user `{target}`.",
-                        ephemeral=True
-                    )
+                    await interaction.followup.send(f"❌ Couldn't find Roblox user `{target}`.", ephemeral=True)
                     return
                 user_id = users[0]["id"]
     except Exception as e:
         await interaction.followup.send(f"❌ Failed to fetch user ID: `{e}`", ephemeral=True)
         return
 
-    # Step 2: Get player token to identify them in server lists
+    # Step 2: Get the target's own avatar thumbnail URL to compare against
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                f"https://games.roblox.com/v1/games/{place_id}/servers/Public?limit=100",
-                timeout=aiohttp.ClientTimeout(total=10)
+                f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=150x150&format=png&isCircular=false",
+                timeout=aiohttp.ClientTimeout(total=5)
             ) as resp:
-                pass  # just checking connectivity
-    except Exception as e:
-        await interaction.followup.send(f"❌ Failed to reach Roblox servers: `{e}`", ephemeral=True)
-        return
+                thumb_data = await resp.json()
+                target_thumb_url = thumb_data["data"][0]["imageUrl"] if thumb_data.get("data") else None
+    except Exception:
+        target_thumb_url = None
 
-    # Step 3: Scan servers for the target
-    await interaction.followup.send(
-        f"🔍 Scanning servers for **{target}**... this may take a moment.",
-        ephemeral=False
-    )
+    await interaction.followup.send(f"🔍 Scanning servers for **{target}**... this may take a moment.")
 
     found_server_id = None
     cursor = ""
@@ -1580,15 +1558,13 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
 
             for server in servers:
                 player_tokens = server.get("playerTokens", [])
-
-                # Check each token against the target user
                 if not player_tokens:
                     continue
 
-                token_check_url = "https://thumbnails.roblox.com/v1/batch"
+                # Resolve player tokens to thumbnail URLs via batch API
                 token_requests = [
                     {
-                        "requestId": f"{user_id}:undefined:{server['id']}:{place_id}:Avatar:150x150",
+                        "requestId": f"{place_id}:{token}:AvatarHeadshot:150x150:png:regular",
                         "type": "AvatarHeadShot",
                         "targetId": 0,
                         "token": token,
@@ -1600,17 +1576,17 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
 
                 try:
                     async with session.post(
-                        token_check_url,
+                        "https://thumbnails.roblox.com/v1/batch",
                         json=token_requests,
                         timeout=aiohttp.ClientTimeout(total=10)
                     ) as token_resp:
                         token_data = await token_resp.json()
                         results = token_data.get("data", [])
                         for result in results:
-                            if str(user_id) in str(result.get("requestId", "")):
-                                if result.get("state") == "Completed":
-                                    found_server_id = server["id"]
-                                    break
+                            img_url = result.get("imageUrl", "")
+                            if target_thumb_url and img_url == target_thumb_url:
+                                found_server_id = server["id"]
+                                break
                 except Exception:
                     continue
 
@@ -1626,7 +1602,7 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
 
     if not found_server_id:
         await interaction.channel.send(
-            f"❌ Could not find **{target}** in any public server of that game. They may be in a private server or have joins off."
+            f"❌ Could not find **{target}** in any public server. They may be in a private server or have joins off."
         )
         return
 
@@ -1636,7 +1612,7 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
 
     embed = discord.Embed(
         title="🎯 Target Found!",
-        description=f"Copy the join link below and paste it in your browser!",
+        description="Copy the join link below and paste it in your browser!",
         color=discord.Color.green()
     )
     embed.add_field(name="Target", value=f"[{target}]({profile_url})", inline=True)
