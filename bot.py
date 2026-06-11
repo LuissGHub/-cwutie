@@ -3,6 +3,7 @@ import sqlite3
 import asyncio
 import json
 import io
+import aiohttp
 from pathlib import Path
 from datetime import datetime, timezone
 
