@@ -1521,7 +1521,7 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
         await interaction.followup.send(f"❌ Failed to fetch user ID: `{e}`", ephemeral=True)
         return
 
-    # Step 2: Get target's headshot URL for comparison
+    # Step 2: Get target's headshot URL as fallback comparator
     target_thumb_url = None
     try:
         async with aiohttp.ClientSession() as session:
@@ -1532,13 +1532,10 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                 thumb_data = await resp.json()
                 if thumb_data.get("data"):
                     target_thumb_url = thumb_data["data"][0].get("imageUrl")
+                    print(f"[DEBUG] Target user_id: {user_id}")
                     print(f"[DEBUG] Target thumbnail URL: {target_thumb_url}")
     except Exception as e:
         print(f"[DEBUG] Failed to get thumbnail: {e}")
-
-    if not target_thumb_url:
-        await interaction.followup.send("❌ Could not fetch target's avatar thumbnail. Try again shortly.", ephemeral=True)
-        return
 
     status_msg = await interaction.followup.send(f"🔍 Scanning servers for **{target}**... this may take a moment.")
 
@@ -1549,7 +1546,7 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
 
     async with aiohttp.ClientSession() as session:
         while True:
-            # Rate limit: pause every 3 pages (~300 servers) to avoid 429s
+            # Rate limit: pause every 3 pages to avoid 429s
             if page > 0 and page % 3 == 0:
                 await asyncio.sleep(1.5)
 
@@ -1563,7 +1560,7 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                         retry_after = int(resp.headers.get("Retry-After", 5))
                         print(f"[DEBUG] 429 on server list — waiting {retry_after}s")
                         await asyncio.sleep(retry_after)
-                        continue  # Retry same page
+                        continue
                     if resp.status != 200:
                         print(f"[DEBUG] Server list status: {resp.status}")
                         break
@@ -1594,6 +1591,8 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                     for token in player_tokens
                 ]
 
+                print(f"[DEBUG] Sending {len(token_requests)} tokens for server {server['id']}")
+
                 try:
                     async with session.post(
                         "https://thumbnails.roblox.com/v1/batch",
@@ -1604,7 +1603,6 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                             retry_after = int(token_resp.headers.get("Retry-After", 3))
                             print(f"[DEBUG] 429 on batch — waiting {retry_after}s")
                             await asyncio.sleep(retry_after)
-                            # Retry this server's batch once
                             async with session.post(
                                 "https://thumbnails.roblox.com/v1/batch",
                                 json=token_requests,
@@ -1615,11 +1613,19 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                             token_data = await token_resp.json()
 
                         results = token_data.get("data", [])
+                        print(f"[DEBUG] Sample result: {results[0] if results else 'none'}")
+
                         for result in results:
+                            result_user_id = result.get("targetId")
                             img_url = result.get("imageUrl", "")
-                            if img_url and img_url == target_thumb_url:
+                            if result_user_id and int(result_user_id) == int(user_id):
                                 found_server_id = server["id"]
                                 break
+                            # Fallback: URL match in case targetId is 0
+                            if img_url and target_thumb_url and img_url == target_thumb_url:
+                                found_server_id = server["id"]
+                                break
+
                 except Exception as e:
                     print(f"[DEBUG] Batch API exception: {e}")
                     continue
