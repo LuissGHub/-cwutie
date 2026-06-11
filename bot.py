@@ -1583,6 +1583,7 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                     ) as token_resp:
                         token_data = await token_resp.json()
                         results = token_data.get("data", [])
+                        print(f"[DEBUG] Batch results for server {server['id']}: {results[:2]}")
                         for result in results:
                             img_url = result.get("imageUrl", "")
                             print(f"[DEBUG] Token imageUrl: {img_url}")
