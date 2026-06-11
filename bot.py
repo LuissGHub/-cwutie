@@ -1484,15 +1484,23 @@ bot.tree.add_command(roblox_group)
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable is not set")
 
+ROBLOX_GAMES = {
+    "baddies": "11158043705",
+    # add more here later: "gamename": "placeid",
+}
+
 @bot.tree.command(name="snipe", description="Join a player's exact Roblox server")
 @app_commands.describe(
     target="Roblox username of the player to snipe",
-    game="Game Link or Place ID"
+    game="Game name (e.g. baddies) or Place ID"
 )
 async def snipe(interaction: discord.Interaction, target: str, game: str):
+    # Resolve game name or URL to place ID
     place_id = None
 
-    if game.startswith("http"):
+    if game.lower() in ROBLOX_GAMES:
+        place_id = ROBLOX_GAMES[game.lower()]
+    elif game.startswith("http"):
         parts = game.split("/")
         for i, part in enumerate(parts):
             if part == "games" and i + 1 < len(parts):
@@ -1503,7 +1511,7 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
 
     if not place_id:
         await interaction.response.send_message(
-            "❌ Please provide a valid Roblox game URL or Place ID.",
+            "❌ Please provide a valid game name, Roblox game URL, or Place ID.",
             ephemeral=True
         )
         return
@@ -1533,17 +1541,18 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
         )
         return
 
-    join_link = f"https://www.roblox.com/games/{place_id}?referrerId={user_id}&referrerType=Player"
+    deep_link = f"roblox://experiences/start?placeId={place_id}&userId={user_id}"
     game_page = f"https://www.roblox.com/games/{place_id}"
     profile_url = f"https://www.roblox.com/users/{user_id}/profile"
 
     embed = discord.Embed(
         title="🎯 Snipe Target",
-        description=f"Click **[Join Game]({join_link})** to join their server!",
+        description=f"Copy the link below and paste it in your browser to join their server!",
         color=discord.Color.red()
     )
     embed.add_field(name="Target", value=f"[{target}]({profile_url})", inline=True)
     embed.add_field(name="Game", value=f"[View Page]({game_page})", inline=True)
+    embed.add_field(name="Join Link", value=f"`{deep_link}`", inline=False)
     embed.set_footer(text=f"Requested by {interaction.user.display_name}")
 
     await interaction.followup.send(embed=embed)
