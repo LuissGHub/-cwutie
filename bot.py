@@ -1503,7 +1503,7 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
 
     await interaction.response.defer()
 
-    # Step 1: Get user ID from username
+    # Step 1: Resolve username → user ID
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -1521,7 +1521,8 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
         await interaction.followup.send(f"❌ Failed to fetch user ID: `{e}`", ephemeral=True)
         return
 
-    # Step 2: Get the target's own avatar thumbnail URL to compare against
+    # Step 2: Get target's headshot URL for comparison
+    target_thumb_url = None
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
@@ -1529,26 +1530,40 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                 timeout=aiohttp.ClientTimeout(total=5)
             ) as resp:
                 thumb_data = await resp.json()
-                target_thumb_url = thumb_data["data"][0]["imageUrl"] if thumb_data.get("data") else None
-                print(f"[DEBUG] Target thumbnail URL: {target_thumb_url}")
+                if thumb_data.get("data"):
+                    target_thumb_url = thumb_data["data"][0].get("imageUrl")
+                    print(f"[DEBUG] Target thumbnail URL: {target_thumb_url}")
     except Exception as e:
         print(f"[DEBUG] Failed to get thumbnail: {e}")
-        target_thumb_url = None
 
-    await interaction.followup.send(f"🔍 Scanning servers for **{target}**... this may take a moment.")
+    if not target_thumb_url:
+        await interaction.followup.send("❌ Could not fetch target's avatar thumbnail. Try again shortly.", ephemeral=True)
+        return
+
+    status_msg = await interaction.followup.send(f"🔍 Scanning servers for **{target}**... this may take a moment.")
 
     found_server_id = None
     cursor = ""
     scanned = 0
+    page = 0
 
     async with aiohttp.ClientSession() as session:
         while True:
+            # Rate limit: pause every 3 pages (~300 servers) to avoid 429s
+            if page > 0 and page % 3 == 0:
+                await asyncio.sleep(1.5)
+
             url = f"https://games.roblox.com/v1/games/{place_id}/servers/Public?limit=100&sortOrder=Asc"
             if cursor:
                 url += f"&cursor={cursor}"
 
             try:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 429:
+                        retry_after = int(resp.headers.get("Retry-After", 5))
+                        print(f"[DEBUG] 429 on server list — waiting {retry_after}s")
+                        await asyncio.sleep(retry_after)
+                        continue  # Retry same page
                     if resp.status != 200:
                         print(f"[DEBUG] Server list status: {resp.status}")
                         break
@@ -1559,7 +1574,8 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
 
             servers = data.get("data", [])
             scanned += len(servers)
-            print(f"[DEBUG] Scanning {len(servers)} servers (total so far: {scanned})")
+            page += 1
+            print(f"[DEBUG] Page {page} — {len(servers)} servers (total: {scanned})")
 
             for server in servers:
                 player_tokens = server.get("playerTokens", [])
@@ -1584,14 +1600,24 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                         json=token_requests,
                         timeout=aiohttp.ClientTimeout(total=10)
                     ) as token_resp:
-                        token_data = await token_resp.json()
-                        print(f"[DEBUG] Batch status: {token_resp.status}")
-                        print(f"[DEBUG] Batch raw response: {token_data}")
+                        if token_resp.status == 429:
+                            retry_after = int(token_resp.headers.get("Retry-After", 3))
+                            print(f"[DEBUG] 429 on batch — waiting {retry_after}s")
+                            await asyncio.sleep(retry_after)
+                            # Retry this server's batch once
+                            async with session.post(
+                                "https://thumbnails.roblox.com/v1/batch",
+                                json=token_requests,
+                                timeout=aiohttp.ClientTimeout(total=10)
+                            ) as retry_resp:
+                                token_data = await retry_resp.json()
+                        else:
+                            token_data = await token_resp.json()
+
                         results = token_data.get("data", [])
-                        print(f"[DEBUG] Batch results count: {len(results)}")
                         for result in results:
                             img_url = result.get("imageUrl", "")
-                            if target_thumb_url and img_url == target_thumb_url:
+                            if img_url and img_url == target_thumb_url:
                                 found_server_id = server["id"]
                                 break
                 except Exception as e:
@@ -1609,9 +1635,7 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                 break
 
     if not found_server_id:
-        await interaction.channel.send(
-            f"❌ Could not find **{target}** in any public server. They may be in a private server or have joins off."
-        )
+        await status_msg.edit(content=f"❌ **{target}** wasn't found in any public server after scanning **{scanned}** servers. They may be in a private server or have joins disabled.")
         return
 
     join_link = f"roblox://experiences/start?placeId={place_id}&gameInstanceId={found_server_id}"
@@ -1620,7 +1644,7 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
 
     embed = discord.Embed(
         title="🎯 Target Found!",
-        description="Copy the join link below and paste it in your browser!",
+        description="Copy the join link below and paste it in your browser to join their server.",
         color=discord.Color.green()
     )
     embed.add_field(name="Target", value=f"[{target}]({profile_url})", inline=True)
@@ -1629,6 +1653,6 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
     embed.add_field(name="Join Link", value=f"`{join_link}`", inline=False)
     embed.set_footer(text=f"Requested by {interaction.user.display_name}")
 
-    await interaction.channel.send(embed=embed)
+    await status_msg.edit(content=None, embed=embed)
     
 bot.run(TOKEN)
