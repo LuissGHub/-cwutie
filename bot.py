@@ -1581,7 +1581,7 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
 
                 token_requests = [
                     {
-                        "requestId": f"{place_id}:{token}:AvatarHeadshot:150x150:png:regular",
+                        "requestId": f"0:{token}:AvatarHeadshot:150x150:png:regular",
                         "type": "AvatarHeadShot",
                         "targetId": 0,
                         "token": token,
@@ -1611,6 +1611,8 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                                 token_data = await retry_resp.json()
                         else:
                             token_data = await token_resp.json()
+
+                        print(f"[DEBUG] Batch status: {token_resp.status}, raw: {str(token_data)[:300]}")
 
                         results = token_data.get("data", [])
                         print(f"[DEBUG] Sample result: {results[0] if results else 'none'}")
