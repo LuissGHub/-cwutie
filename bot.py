@@ -1483,7 +1483,7 @@ bot.tree.add_command(roblox_group)
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable is not set")
 
-@bot.tree.command(name="snipe", description="Join a player's Roblox game instantly")
+@bot.tree.command(name="snipe", description="Join a player's exact Roblox server")
 @app_commands.describe(
     target="Roblox username of the player to snipe",
     game="Game Link or Place ID"
@@ -1507,18 +1507,36 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
         )
         return
 
+    # Fetch Roblox user ID from username
+    await interaction.response.defer()
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://users.roblox.com/v1/usernames/users",
+            json={"usernames": [target], "excludeBannedUsers": False}
+        ) as resp:
+            data = await resp.json()
+            users = data.get("data", [])
+            if not users:
+                await interaction.followup.send(
+                    f"❌ Couldn't find Roblox user `{target}`.",
+                    ephemeral=True
+                )
+                return
+            user_id = users[0]["id"]
+
+    join_link = f"https://www.roblox.com/games/{place_id}?referrerId={user_id}&referrerType=Player"
     game_page = f"https://www.roblox.com/games/{place_id}"
-    profile_url = f"https://www.roblox.com/users/profile?username={target}"
+    profile_url = f"https://www.roblox.com/users/{user_id}/profile"
 
     embed = discord.Embed(
         title="🎯 Snipe Target",
-        description=f"Click **[Join {target}]({profile_url})** to join their server!",
+        description=f"Click **[Join Game]({join_link})** to join their server!",
         color=discord.Color.red()
     )
     embed.add_field(name="Target", value=f"[{target}]({profile_url})", inline=True)
     embed.add_field(name="Game", value=f"[View Page]({game_page})", inline=True)
     embed.set_footer(text=f"Requested by {interaction.user.display_name}")
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
     
 bot.run(TOKEN)
