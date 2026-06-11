@@ -1512,7 +1512,7 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
 
     embed = discord.Embed(
         title="🎯 Snipe Target",
-        description=f"Click **[Join Game]({game_page})** to snipe them!",
+        description=f"Click **[Join {target}]({profile_url})** to join their server!",
         color=discord.Color.red()
     )
     embed.add_field(name="Target", value=f"[{target}]({profile_url})", inline=True)
