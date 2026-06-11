@@ -1546,8 +1546,7 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
 
     async with aiohttp.ClientSession() as session:
         while True:
-            # Rate limit: pause every 3 pages to avoid 429s
-        if page > 0 and page % 2 == 0:
+            if page > 0 and page % 2 == 0:
                 await asyncio.sleep(2.0)
 
             url = f"https://games.roblox.com/v1/games/{place_id}/servers/Public?limit=100&sortOrder=Asc"
@@ -1555,11 +1554,12 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                 url += f"&cursor={cursor}"
 
             try:
-                if resp.status == 429:
-    retry_after = int(resp.headers.get("Retry-After", 0)) or 10
-    print(f"[DEBUG] 429 on server list — waiting {retry_after}s")
-    await asyncio.sleep(retry_after)
-    continue
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 429:
+                        retry_after = int(resp.headers.get("Retry-After", 0)) or 10
+                        print(f"[DEBUG] 429 on server list — waiting {retry_after}s")
+                        await asyncio.sleep(retry_after)
+                        continue
                     if resp.status != 200:
                         print(f"[DEBUG] Server list status: {resp.status}")
                         break
@@ -1600,7 +1600,7 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                         timeout=aiohttp.ClientTimeout(total=10)
                     ) as token_resp:
                         if token_resp.status == 429:
-                            retry_after = int(token_resp.headers.get("Retry-After", 3))
+                            retry_after = int(token_resp.headers.get("Retry-After", 0)) or 10
                             print(f"[DEBUG] 429 on batch — waiting {retry_after}s")
                             await asyncio.sleep(retry_after)
                             async with session.post(
@@ -1623,7 +1623,6 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
                             if result_user_id and int(result_user_id) == int(user_id):
                                 found_server_id = server["id"]
                                 break
-                            # Fallback: URL match in case targetId is 0
                             if img_url and target_thumb_url and img_url == target_thumb_url:
                                 found_server_id = server["id"]
                                 break
