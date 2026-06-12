@@ -1521,131 +1521,50 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
         await interaction.followup.send(f"❌ Failed to fetch user ID: `{e}`", ephemeral=True)
         return
 
-    # Step 2: Get target's headshot URL as fallback comparator
-    target_thumb_url = None
+    # Step 2: Check presence API
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=150x150&format=png&isCircular=false",
+            async with session.post(
+                "https://presence.roblox.com/v1/presence/users",
+                json={"userIds": [user_id]},
                 timeout=aiohttp.ClientTimeout(total=5)
             ) as resp:
-                thumb_data = await resp.json()
-                if thumb_data.get("data"):
-                    target_thumb_url = thumb_data["data"][0].get("imageUrl")
-                    print(f"[DEBUG] Target user_id: {user_id}")
-                    print(f"[DEBUG] Target thumbnail URL: {target_thumb_url}")
+                presence_data = await resp.json()
+                print(f"[DEBUG] Presence raw: {str(presence_data)[:300]}")
     except Exception as e:
-        print(f"[DEBUG] Failed to get thumbnail: {e}")
-
-    status_msg = await interaction.followup.send(f"🔍 Scanning servers for **{target}**... this may take a moment.")
-
-    found_server_id = None
-    cursor = ""
-    scanned = 0
-    page = 0
-
-    async with aiohttp.ClientSession() as session:
-        while True:
-            if page > 0 and page % 2 == 0:
-                await asyncio.sleep(2.0)
-
-            url = f"https://games.roblox.com/v1/games/{place_id}/servers/Public?limit=100&sortOrder=Asc"
-            if cursor:
-                url += f"&cursor={cursor}"
-
-            try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status == 429:
-                        retry_after = int(resp.headers.get("Retry-After", 0)) or 10
-                        print(f"[DEBUG] 429 on server list — waiting {retry_after}s")
-                        await asyncio.sleep(retry_after)
-                        continue
-                    if resp.status != 200:
-                        print(f"[DEBUG] Server list status: {resp.status}")
-                        break
-                    data = await resp.json()
-            except Exception as e:
-                print(f"[DEBUG] Server list exception: {e}")
-                break
-
-            servers = data.get("data", [])
-            scanned += len(servers)
-            page += 1
-            print(f"[DEBUG] Page {page} — {len(servers)} servers (total: {scanned})")
-
-            for server in servers:
-                player_tokens = server.get("playerTokens", [])
-                print(f"[DEBUG] Server {server['id']} — playerTokens count: {len(player_tokens)}")
-                if not player_tokens:
-                    continue
-
-                token_requests = [
-                    {
-                        "requestId": f"0:{token}:AvatarHeadshot:150x150:png:regular",
-                        "type": "AvatarHeadShot",
-                        "targetId": 0,
-                        "token": token,
-                        "format": "png",
-                        "size": "150x150"
-                    }
-                    for token in player_tokens
-                ]
-
-                print(f"[DEBUG] Sending {len(token_requests)} tokens for server {server['id']}")
-
-                try:
-                    async with session.post(
-                        "https://thumbnails.roblox.com/v1/batch",
-                        json=token_requests,
-                        timeout=aiohttp.ClientTimeout(total=10)
-                    ) as token_resp:
-                        if token_resp.status == 429:
-                            retry_after = int(token_resp.headers.get("Retry-After", 0)) or 10
-                            print(f"[DEBUG] 429 on batch — waiting {retry_after}s")
-                            await asyncio.sleep(retry_after)
-                            async with session.post(
-                                "https://thumbnails.roblox.com/v1/batch",
-                                json=token_requests,
-                                timeout=aiohttp.ClientTimeout(total=10)
-                            ) as retry_resp:
-                                token_data = await retry_resp.json()
-                        else:
-                            token_data = await token_resp.json()
-
-                        print(f"[DEBUG] Batch status: {token_resp.status}, raw: {str(token_data)[:300]}")
-
-                        results = token_data.get("data", [])
-                        print(f"[DEBUG] Sample result: {results[0] if results else 'none'}")
-
-                        for result in results:
-                            result_user_id = result.get("targetId")
-                            img_url = result.get("imageUrl", "")
-                            if result_user_id and int(result_user_id) == int(user_id):
-                                found_server_id = server["id"]
-                                break
-                            if img_url and target_thumb_url and img_url == target_thumb_url:
-                                found_server_id = server["id"]
-                                break
-
-                except Exception as e:
-                    print(f"[DEBUG] Batch API exception: {e}")
-                    continue
-
-                if found_server_id:
-                    break
-
-            if found_server_id:
-                break
-
-            cursor = data.get("nextPageCursor")
-            if not cursor:
-                break
-
-    if not found_server_id:
-        await status_msg.edit(content=f"❌ **{target}** wasn't found in any public server after scanning **{scanned}** servers. They may be in a private server or have joins disabled.")
+        await interaction.followup.send(f"❌ Failed to fetch presence: `{e}`", ephemeral=True)
         return
 
-    join_link = f"roblox://experiences/start?placeId={place_id}&gameInstanceId={found_server_id}"
+    presences = presence_data.get("userPresences", [])
+    if not presences:
+        await interaction.followup.send("❌ Could not retrieve presence data for that user.", ephemeral=True)
+        return
+
+    presence = presences[0]
+    user_place_id = str(presence.get("placeId") or "")
+    game_id = presence.get("gameId")
+    presence_type = presence.get("userPresenceType")
+
+    print(f"[DEBUG] presenceType={presence_type}, placeId={user_place_id}, gameId={game_id}")
+
+    if presence_type != 2:
+        await interaction.followup.send(f"❌ **{target}** is not currently in a game.", ephemeral=True)
+        return
+
+    if user_place_id != place_id:
+        game_name = next((n for n, pid in ROBLOX_GAMES.items() if pid == user_place_id), None)
+        location = f"**{game_name}**" if game_name else f"a different game"
+        await interaction.followup.send(f"❌ **{target}** is in {location}, not the selected game.", ephemeral=True)
+        return
+
+    if not game_id:
+        await interaction.followup.send(
+            f"❌ **{target}** is in Baddies but their activity is hidden — can't get their server ID.",
+            ephemeral=True
+        )
+        return
+
+    join_link = f"roblox://experiences/start?placeId={place_id}&gameInstanceId={game_id}"
     profile_url = f"https://www.roblox.com/users/{user_id}/profile"
     game_page = f"https://www.roblox.com/games/{place_id}"
 
@@ -1656,10 +1575,9 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
     )
     embed.add_field(name="Target", value=f"[{target}]({profile_url})", inline=True)
     embed.add_field(name="Game", value=f"[View Page]({game_page})", inline=True)
-    embed.add_field(name="Servers Scanned", value=str(scanned), inline=True)
     embed.add_field(name="Join Link", value=f"`{join_link}`", inline=False)
     embed.set_footer(text=f"Requested by {interaction.user.display_name}")
 
-    await status_msg.edit(content=None, embed=embed)
+    await interaction.followup.send(embed=embed)
     
 bot.run(TOKEN)
