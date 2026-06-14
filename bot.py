@@ -1468,7 +1468,8 @@ async def role_add(interaction: discord.Interaction, user: discord.Member, role:
         return
     try:
         await user.add_roles(role)
-        await interaction.response.send_message(f"✅ Added {role.mention} to {user.mention}.", ephemeral=True)
+        await interaction.response.send_message(f"\<a:0000:1488556886918824068> added {role.mention} to {user.mention}.")
+
     except discord.Forbidden:
         await interaction.response.send_message("⚠️ I don't have permission to assign that role.", ephemeral=True)
 
@@ -1478,11 +1479,11 @@ async def role_add(interaction: discord.Interaction, user: discord.Member, role:
 async def role_remove(interaction: discord.Interaction, user: discord.Member, role: discord.Role):
     guild_only(interaction)
     if role not in user.roles:
-        await interaction.response.send_message(f"❌ {user.mention} doesn't have {role.mention}.", ephemeral=True)
+        await interaction.response.send_message(f" {user.mention} doesn't have {role.mention}.", ephemeral=True)
         return
     try:
         await user.remove_roles(role)
-        await interaction.response.send_message(f"✅ Removed {role.mention} from {user.mention}.", ephemeral=True)
+        await interaction.response.send_message(f" \<a:0000:1488556886918824068> removed {role.mention} from {user.mention}.")
     except discord.Forbidden:
         await interaction.response.send_message("⚠️ I don't have permission to remove that role.", ephemeral=True)
 
