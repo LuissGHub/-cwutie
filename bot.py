@@ -1453,6 +1453,43 @@ async def waitlist_move(interaction: discord.Interaction):
 
 
 # ———————————————––
+# Commands — Role Management
+# ———————————————––
+
+role_group = app_commands.Group(name="role", description="Role management")
+
+@role_group.command(name="add", description="Add a role to a user")
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.describe(user="The user to role", role="The role to add")
+async def role_add(interaction: discord.Interaction, user: discord.Member, role: discord.Role):
+    guild_only(interaction)
+    if role in user.roles:
+        await interaction.response.send_message(f"❌ {user.mention} already has {role.mention}.", ephemeral=True)
+        return
+    try:
+        await user.add_roles(role)
+        await interaction.response.send_message(f"✅ Added {role.mention} to {user.mention}.", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message("⚠️ I don't have permission to assign that role.", ephemeral=True)
+
+@role_group.command(name="remove", description="Remove a role from a user")
+@app_commands.checks.has_permissions(manage_roles=True)
+@app_commands.describe(user="The user to remove the role from", role="The role to remove")
+async def role_remove(interaction: discord.Interaction, user: discord.Member, role: discord.Role):
+    guild_only(interaction)
+    if role not in user.roles:
+        await interaction.response.send_message(f"❌ {user.mention} doesn't have {role.mention}.", ephemeral=True)
+        return
+    try:
+        await user.remove_roles(role)
+        await interaction.response.send_message(f"✅ Removed {role.mention} from {user.mention}.", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message("⚠️ I don't have permission to remove that role.", ephemeral=True)
+
+bot.tree.add_command(role_group)
+
+
+# ———————————————––
 # Commands — Roblox Tax Calculator
 # ———————————————––
 
@@ -1579,5 +1616,5 @@ async def snipe(interaction: discord.Interaction, target: str, game: str):
     embed.set_footer(text=f"Requested by {interaction.user.display_name}")
 
     await interaction.followup.send(embed=embed)
-    
+
 bot.run(TOKEN)
