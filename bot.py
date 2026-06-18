@@ -4,6 +4,7 @@ import asyncio
 import json
 import io
 import aiohttp
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -66,7 +67,8 @@ def init_db() -> None:
                 "verify_color", "verify_image_url", "verify_thumbnail_url",
                 "verify_success_message", "verify_already_message",
                 "boost_channel_id", "boost_text", "boost_title", "boost_color",
-                "boost_image_url", "boost_thumbnail_url", "boost_use_avatar"]:
+                "boost_image_url", "boost_thumbnail_url", "boost_use_avatar",
+                "vouch_channel_id", "vouch_reaction_emoji", "vouch_super_reaction"]:
         try:
             cur.execute(f"ALTER TABLE settings ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
@@ -159,6 +161,7 @@ def upsert_settings(guild_id: int, **kwargs) -> None:
         "verify_image_url", "verify_thumbnail_url", "verify_success_message",
         "verify_already_message", "boost_channel_id", "boost_text", "boost_title",
         "boost_color", "boost_image_url", "boost_thumbnail_url", "boost_use_avatar",
+        "vouch_channel_id", "vouch_reaction_emoji", "vouch_super_reaction",
     }
     updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not updates:
@@ -703,6 +706,36 @@ async def on_message(message: discord.Message):
     if message.guild is None:
         return
 
+    # ── Vouch auto-react ──
+    settings = get_settings(message.guild.id)
+    if settings and settings["vouch_channel_id"]:
+        if message.channel.id == int(settings["vouch_channel_id"]):
+            # Skip reacting to sticky messages
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT last_message_id FROM sticky_messages WHERE guild_id = ? AND channel_id = ?", (message.guild.id, message.channel.id))
+            sticky_row = cur.fetchone()
+            conn.close()
+            
+            is_sticky = sticky_row and sticky_row["last_message_id"] == message.id
+            
+            if not is_sticky:
+                reaction_emojis = settings["vouch_reaction_emoji"]
+                super_reaction = settings["vouch_super_reaction"] == "1"
+                if reaction_emojis:
+                    emoji_list = [e.strip() for e in reaction_emojis.split(",") if e.strip()]
+                    for emoji in emoji_list:
+                        try:
+                            await message.add_reaction(emoji)
+                            # If super_reaction is enabled, remove and re-add to make it super
+                            if super_reaction:
+                                await asyncio.sleep(0.1)
+                                await message.remove_reaction(emoji, bot.user)
+                                await asyncio.sleep(0.1)
+                                await message.add_reaction(emoji)
+                        except Exception as e:
+                            print(f"[DEBUG] Failed to auto-react with {emoji}: {e}")
+
     content = message.content.strip()
     content_lower = content.lower()
 
@@ -1135,6 +1168,33 @@ async def verify_responses(interaction: discord.Interaction, success_message: st
 
 
 # ———————————————––
+# Commands — Vouch
+# ———————————————––
+
+@bot.tree.command(name="vouch_setup", description="Set up auto-reaction in a vouch channel")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    channel="Channel where auto-reactions will be added",
+    emojis="Emojis to react with, separated by spaces (e.g. ✅ 💖 👍)",
+    super_reaction="Enable super reaction mode (remove & re-add to highlight)"
+)
+async def vouch_setup(interaction: discord.Interaction, channel: discord.TextChannel, emojis: str, super_reaction: bool = False):
+    guild = guild_only(interaction)
+    emoji_list = emojis.split()
+    upsert_settings(guild.id, vouch_channel_id=str(channel.id), vouch_reaction_emoji=",".join(emoji_list), vouch_super_reaction="1" if super_reaction else "0")
+    emoji_display = " ".join(emoji_list)
+    await interaction.response.send_message(f"✅ Vouch channel set to {channel.mention}\n**Emojis:** {emoji_display}\n**Super reaction:** {'Enabled' if super_reaction else 'Disabled'}", ephemeral=True)
+
+
+@bot.tree.command(name="vouch_clear", description="Disable auto-reactions in vouch channel")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def vouch_clear(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, vouch_channel_id="", vouch_reaction_emoji="", vouch_super_reaction="0")
+    await interaction.response.send_message("✅ Vouch auto-reaction disabled.", ephemeral=True)
+
+
+# ———————————————––
 # Commands — Sticky
 # ———————————————––
 
@@ -1519,103 +1579,94 @@ async def roblox_calctax(interaction: discord.Interaction, amount: int, discount
 
 bot.tree.add_command(roblox_group)
 
+
+# ———————————————––
+# Commands — Emoji/Sticker Stealing
+# ———————————————––
+
+emoji_group = app_commands.Group(name="emoji", description="Emoji management")
+
+@emoji_group.command(name="steal", description="Copy an emoji from another server to this one")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(emoji="The emoji to steal (react with it or paste the emoji/code)", name="Optional name for the emoji (auto-detected if omitted)")
+async def emoji_steal(interaction: discord.Interaction, emoji: str, name: str | None = None):
+    guild = guild_only(interaction)
+    await interaction.response.defer(ephemeral=True)
+    
+    # Try to parse custom emoji format <:name:id> or <a:name:id>
+    custom_match = re.match(r'<a?:(\w+):(\d+)>', emoji)
+    if custom_match:
+        emoji_name = name or custom_match.group(1)
+        emoji_id = custom_match.group(2)
+        emoji_url = f"https://cdn.discordapp.com/emojis/{emoji_id}.{'gif' if emoji.startswith('<a:') else 'png'}"
+    else:
+        # It's a unicode emoji or we need to download it differently
+        await interaction.followup.send("❌ Please use a custom emoji or emoji link. React with the emoji you want to steal!", ephemeral=True)
+        return
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(emoji_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    await interaction.followup.send("❌ Couldn't download the emoji.", ephemeral=True)
+                    return
+                emoji_data = await resp.read()
+        
+        created_emoji = await guild.create_custom_emoji(name=emoji_name, image=emoji_data)
+        await interaction.followup.send(f"✅ Emoji stolen! {created_emoji} `{created_emoji.name}`", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send("❌ I don't have permission to create emojis.", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {str(e)[:100]}", ephemeral=True)
+
+
+bot.tree.add_command(emoji_group)
+
+
+# Sticker stealing
+sticker_group = app_commands.Group(name="sticker", description="Sticker management")
+
+@sticker_group.command(name="steal", description="Copy a sticker from another server to this one")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(sticker_id="Sticker ID (get from URL or use a sticker link)", name="Optional name for the sticker")
+async def sticker_steal(interaction: discord.Interaction, sticker_id: str, name: str | None = None):
+    guild = guild_only(interaction)
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        sticker_id_int = int(sticker_id)
+        sticker = await bot.fetch_sticker(sticker_id_int)
+    except (ValueError, discord.NotFound):
+        await interaction.followup.send("❌ Sticker not found. Make sure the ID is correct.", ephemeral=True)
+        return
+    
+    sticker_name = name or sticker.name
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(sticker.url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    await interaction.followup.send("❌ Couldn't download the sticker.", ephemeral=True)
+                    return
+                sticker_data = await resp.read()
+        
+        created_sticker = await guild.create_sticker(
+            name=sticker_name,
+            description=f"Stolen from {sticker.guild.name}" if sticker.guild else "Imported sticker",
+            emoji="📌",
+            file=discord.File(io.BytesIO(sticker_data), filename=f"{sticker_name}.png")
+        )
+        await interaction.followup.send(f"✅ Sticker stolen! **{created_sticker.name}**", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send("❌ I don't have permission to create stickers.", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {str(e)[:100]}", ephemeral=True)
+
+
+bot.tree.add_command(sticker_group)
+
+
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable is not set")
-
-ROBLOX_GAMES = {
-    "Baddies": "11158043705",
-    # add more here later
-}
-
-@bot.tree.command(name="snipe", description="Find and join a player's exact Roblox server")
-@app_commands.describe(
-    target="Roblox username of the player to snipe",
-    game="Select a game"
-)
-@app_commands.choices(game=[
-    app_commands.Choice(name=name, value=place_id)
-    for name, place_id in ROBLOX_GAMES.items()
-])
-async def snipe(interaction: discord.Interaction, target: str, game: str):
-    place_id = game
-
-    await interaction.response.defer()
-
-    # Step 1: Resolve username → user ID
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://users.roblox.com/v1/usernames/users",
-                json={"usernames": [target], "excludeBannedUsers": False},
-                timeout=aiohttp.ClientTimeout(total=5)
-            ) as resp:
-                data = await resp.json()
-                users = data.get("data", [])
-                if not users:
-                    await interaction.followup.send(f"❌ Couldn't find Roblox user `{target}`.", ephemeral=True)
-                    return
-                user_id = users[0]["id"]
-    except Exception as e:
-        await interaction.followup.send(f"❌ Failed to fetch user ID: `{e}`", ephemeral=True)
-        return
-
-    # Step 2: Check presence API
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://presence.roblox.com/v1/presence/users",
-                json={"userIds": [user_id]},
-                timeout=aiohttp.ClientTimeout(total=5)
-            ) as resp:
-                presence_data = await resp.json()
-                print(f"[DEBUG] Presence raw: {str(presence_data)[:300]}")
-    except Exception as e:
-        await interaction.followup.send(f"❌ Failed to fetch presence: `{e}`", ephemeral=True)
-        return
-
-    presences = presence_data.get("userPresences", [])
-    if not presences:
-        await interaction.followup.send("❌ Could not retrieve presence data for that user.", ephemeral=True)
-        return
-
-    presence = presences[0]
-    user_place_id = str(presence.get("placeId") or "")
-    game_id = presence.get("gameId")
-    presence_type = presence.get("userPresenceType")
-
-    print(f"[DEBUG] presenceType={presence_type}, placeId={user_place_id}, gameId={game_id}")
-
-    if presence_type != 2:
-        await interaction.followup.send(f"❌ **{target}** is not currently in a game.", ephemeral=True)
-        return
-
-    if user_place_id != place_id:
-        game_name = next((n for n, pid in ROBLOX_GAMES.items() if pid == user_place_id), None)
-        location = f"**{game_name}**" if game_name else f"a different game"
-        await interaction.followup.send(f"❌ **{target}** is in {location}, not the selected game.", ephemeral=True)
-        return
-
-    if not game_id:
-        await interaction.followup.send(
-            f"❌ **{target}** is in Baddies but their activity is hidden — can't get their server ID.",
-            ephemeral=True
-        )
-        return
-
-    join_link = f"roblox://experiences/start?placeId={place_id}&gameInstanceId={game_id}"
-    profile_url = f"https://www.roblox.com/users/{user_id}/profile"
-    game_page = f"https://www.roblox.com/games/{place_id}"
-
-    embed = discord.Embed(
-        title="🎯 Target Found!",
-        description="Copy the join link below and paste it in your browser to join their server.",
-        color=discord.Color.green()
-    )
-    embed.add_field(name="Target", value=f"[{target}]({profile_url})", inline=True)
-    embed.add_field(name="Game", value=f"[View Page]({game_page})", inline=True)
-    embed.add_field(name="Join Link", value=f"`{join_link}`", inline=False)
-    embed.set_footer(text=f"Requested by {interaction.user.display_name}")
-
-    await interaction.followup.send(embed=embed)
 
 bot.run(TOKEN)
