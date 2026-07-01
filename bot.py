@@ -33,6 +33,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # Constants
 # ———————————————––
 
+CHECK = "<a:0000:1488556886918824068>"
+
 THEMES = {
     "pink": 0xF7CFE3,
     "blue": 0xCFEFFF,
@@ -409,9 +411,9 @@ class EmbedModal(discord.ui.Modal, title="Create Embed"):
 
             if self.post_here:
                 await interaction.response.send_message(embed=embed)
-                await interaction.followup.send(f"✅ Also saved as **{self.save_name}**. Use `/embedpost {self.save_name}` anytime to repost it.", ephemeral=True)
+                await interaction.followup.send(f"{CHECK} Also saved as **{self.save_name}**. Use `/embedpost {self.save_name}` anytime to repost it.", ephemeral=True)
             else:
-                await interaction.response.send_message(f"✅ Saved as **{self.save_name}**! Use `/embedpost {self.save_name}` to post it in any channel.", embed=embed, ephemeral=True)
+                await interaction.response.send_message(f"{CHECK} Saved as **{self.save_name}**! Use `/embedpost {self.save_name}` to post it in any channel.", embed=embed, ephemeral=True)
         else:
             await interaction.response.send_message(embed=embed)
 
@@ -447,7 +449,7 @@ class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
             image=str(self.banner_url) or None,
             user_avatar_url=interaction.user.display_avatar.url,
         )
-        await interaction.response.send_message("✅ Welcome settings updated! Here's a preview:", embed=preview, ephemeral=True)
+        await interaction.response.send_message(f"{CHECK} Welcome settings updated! Here's a preview:", embed=preview, ephemeral=True)
 
 
 class BoostEditModal(discord.ui.Modal, title="Edit Boost Settings"):
@@ -506,7 +508,7 @@ class BoostEditModal(discord.ui.Modal, title="Edit Boost Settings"):
             thumbnail=thumb,
             user_avatar_url=interaction.user.display_avatar.url if use_av else None
         )
-        await interaction.response.send_message("✅ Boost settings updated! Here's a preview:", embed=embed, ephemeral=True)
+        await interaction.response.send_message(f"{CHECK} Boost settings updated! Here's a preview:", embed=embed, ephemeral=True)
 
 
 # ———————————————––
@@ -530,12 +532,12 @@ class VerifyButton(discord.ui.Button):
             return await interaction.response.send_message("⚠️ Verify role not found.", ephemeral=True)
         
         if role in interaction.user.roles:
-            msg = (settings["verify_already_message"] or "✅ You're already verified!")
+            msg = (settings["verify_already_message"] or f"{CHECK} You're already verified!")
             return await interaction.response.send_message(msg, ephemeral=True)
         
         try:
             await interaction.user.add_roles(role)
-            msg = (settings["verify_success_message"] or "✅ You've been verified!")
+            msg = (settings["verify_success_message"] or f"{CHECK} You've been verified!")
             await interaction.response.send_message(msg, ephemeral=True)
         except discord.Forbidden:
             await interaction.response.send_message("⚠️ I need higher permissions to assign this role.", ephemeral=True)
@@ -562,7 +564,7 @@ class WaitlistRemoveSelect(discord.ui.Select):
         data[key]["users"] = [e for e in data[key]["users"] if entry_id(e) != cid]
         save_waitlists(data)
         await update_waitlist_message(bot, interaction.guild.id)
-        await interaction.response.edit_message(content="✅ Removed from the waitlist.", view=None)
+        await interaction.response.edit_message(content=f"{CHECK} Removed from the waitlist.", view=None)
 
 
 class WaitlistRemoveView(discord.ui.View):
@@ -649,7 +651,7 @@ class WaitlistMovePositionSelect(discord.ui.Select):
         await update_waitlist_message(bot, interaction.guild.id)
         ch = interaction.guild.get_channel(int(self.channel_id))
         ch_mention = ch.mention if ch else f"<#{self.channel_id}>"
-        await interaction.response.edit_message(content=f"✅ Moved {ch_mention} to slot {self.values[0]}.", view=None)
+        await interaction.response.edit_message(content=f"{CHECK} Moved {ch_mention} to slot {self.values[0]}.", view=None)
 
 
 class WaitlistMovePositionView(discord.ui.View):
@@ -855,7 +857,7 @@ async def embed_command(interaction: discord.Interaction, title: str | None = No
         conn.commit()
         conn.close()
         await interaction.response.send_message(embed=embed)
-        await interaction.followup.send(f"✅ Saved as **{save}**! Use `/embedpost {save}` to repost anytime.", ephemeral=True)
+        await interaction.followup.send(f"{CHECK} Saved as **{save}**! Use `/embedpost {save}` to repost anytime.", ephemeral=True)
     else:
         await interaction.response.send_message(embed=embed)
 
@@ -938,7 +940,7 @@ async def embedchannel(interaction: discord.Interaction, name: str, channel: dis
     conn.commit()
     conn.close()
     
-    await interaction.response.send_message(f"✅ **{name}** will post to {channel.mention}.", ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} **{name}** will post to {channel.mention}.", ephemeral=True)
 
 
 @bot.tree.command(name="embeddelete", description="Delete a saved embed")
@@ -976,7 +978,7 @@ async def welcome_setup(interaction: discord.Interaction, welcome_channel: disco
     upsert_settings(guild.id, **kwargs)
     thumb = thumbnail_url or None
     preview = build_embed(title=None, description=welcome_text.replace("{mention}", interaction.user.mention), theme=color, image=banner_url, thumbnail=thumb, user_avatar_url=interaction.user.display_avatar.url if not thumb else None)
-    await interaction.response.send_message("✅ Welcome message saved! Preview:", embed=preview, ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} Welcome message saved! Preview:", embed=preview, ephemeral=True)
     if banner2_url:
         embed2 = build_embed(title=None, description=None, theme=color, image=banner2_url)
         await interaction.followup.send(embed=embed2, ephemeral=True)
@@ -1012,7 +1014,7 @@ async def welcome_edit(interaction: discord.Interaction, welcome_text: str | Non
     updated = get_settings(guild.id)
     thumb = updated["welcome_thumbnail_url"] if updated["welcome_thumbnail_url"] else None
     preview = build_embed(title=None, description=(updated["welcome_text"] or "Welcome!").replace("{mention}", interaction.user.mention), theme=updated["welcome_theme"] or "pink", image=updated["welcome_banner_url"], thumbnail=thumb, user_avatar_url=interaction.user.display_avatar.url if not thumb else None)
-    await interaction.response.send_message("✅ Welcome message updated! Preview:", embed=preview, ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} Welcome message updated! Preview:", embed=preview, ephemeral=True)
     if updated["welcome_banner2_url"]:
         embed2 = build_embed(title=None, description=None, theme=updated["welcome_theme"] or "pink", image=updated["welcome_banner2_url"])
         await interaction.followup.send(embed=embed2, ephemeral=True)
@@ -1052,7 +1054,7 @@ async def themes(interaction: discord.Interaction):
 async def set_boost_channel(interaction: discord.Interaction, channel: discord.TextChannel):
     guild = guild_only(interaction)
     upsert_settings(guild.id, boost_channel_id=channel.id)
-    await interaction.response.send_message(f"✅ Boost announcements will go to {channel.mention}!", ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} Boost announcements will go to {channel.mention}!", ephemeral=True)
 
 
 @bot.tree.command(name="set_boost_message", description="Set the boost message")
@@ -1072,7 +1074,7 @@ async def set_boost_message(interaction: discord.Interaction, message: str, titl
     thumb = thumbnail or None
     preview_text = message.replace("\\n", "\n").replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
     embed = build_embed(title=title, description=preview_text, theme=color, image=image, thumbnail=None if use_avatar else thumb, user_avatar_url=interaction.user.display_avatar.url if use_avatar else None)
-    await interaction.response.send_message("✅ Boost message saved! Preview:", embed=embed, ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} Boost message saved! Preview:", embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="boost_edit", description="Edit boost settings")
@@ -1148,7 +1150,7 @@ async def verify_message(interaction: discord.Interaction, title: str | None = N
     
     new_msg = await channel.send(embed=embed, view=view)
     upsert_settings(guild.id, verify_message_id=str(new_msg.id))
-    await interaction.followup.send(f"✅ Verify message updated in {channel.mention}", ephemeral=True)
+    await interaction.followup.send(f"{CHECK} Verify message updated in {channel.mention}", ephemeral=True)
 
 
 @bot.tree.command(name="verify_settings", description="Set verify role and channel")
@@ -1157,7 +1159,7 @@ async def verify_message(interaction: discord.Interaction, title: str | None = N
 async def verify_settings(interaction: discord.Interaction, role: discord.Role, channel: discord.TextChannel):
     guild = interaction.guild
     upsert_settings(guild.id, verify_role_id=str(role.id), verify_channel_id=channel.id)
-    await interaction.response.send_message(f"✅ Verify setup updated\nRole: {role.mention}\nChannel: {channel.mention}", ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} Verify setup updated\nRole: {role.mention}\nChannel: {channel.mention}", ephemeral=True)
 
 
 @bot.tree.command(name="verify_responses", description="Set verify response messages")
@@ -1176,7 +1178,7 @@ async def verify_responses(interaction: discord.Interaction, success_message: st
         return
     
     upsert_settings(guild.id, **updates)
-    await interaction.response.send_message("✅ Verify responses updated!", ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} Verify responses updated!", ephemeral=True)
 
 
 # ———————————————––
@@ -1191,7 +1193,7 @@ async def vouch_setup(interaction: discord.Interaction, channel: discord.TextCha
     emoji_list = emojis.split()
     upsert_settings(guild.id, vouch_channel_id=str(channel.id), vouch_reaction_emoji=",".join(emoji_list), vouch_super_reaction="1" if super_reaction else "0")
     emoji_display = " ".join(emoji_list)
-    await interaction.response.send_message(f"✅ Vouch channel set to {channel.mention}\n**Emojis:** {emoji_display}\n**Super reaction:** {'Enabled' if super_reaction else 'Disabled'}", ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} Vouch channel set to {channel.mention}\n**Emojis:** {emoji_display}\n**Super reaction:** {'Enabled' if super_reaction else 'Disabled'}", ephemeral=True)
 
 
 @bot.tree.command(name="vouch_clear", description="Disable vouch auto-reactions")
@@ -1199,7 +1201,7 @@ async def vouch_setup(interaction: discord.Interaction, channel: discord.TextCha
 async def vouch_clear(interaction: discord.Interaction):
     guild = guild_only(interaction)
     upsert_settings(guild.id, vouch_channel_id="", vouch_reaction_emoji="", vouch_super_reaction="0")
-    await interaction.response.send_message("✅ Vouch auto-reaction disabled.", ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} Vouch auto-reaction disabled.", ephemeral=True)
 
 
 # ———————————————––
@@ -1216,7 +1218,7 @@ async def sticky_set(interaction: discord.Interaction, message: str):
     cur.execute("INSERT OR REPLACE INTO sticky_messages (guild_id, channel_id, message) VALUES (?, ?, ?)", (guild.id, interaction.channel_id, message))
     conn.commit()
     conn.close()
-    await interaction.response.send_message("✅ Sticky message set for this channel!", ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} Sticky message set for this channel!", ephemeral=True)
 
 
 @bot.tree.command(name="sticky_clear", description="Remove the sticky message from this channel")
@@ -1264,7 +1266,7 @@ async def autoresponder_add(interaction: discord.Interaction, trigger: str, mess
     try:
         cur.execute("INSERT INTO autoresponders (guild_id, trigger, message, match_type) VALUES (?, ?, ?, ?)", (guild.id, trigger, message, match_type))
         conn.commit()
-        await interaction.response.send_message(f"✅ Autoresponder `{trigger}` created! (match: {match_type})", ephemeral=True)
+        await interaction.response.send_message(f"{CHECK} Autoresponder `{trigger}` created! (match: {match_type})", ephemeral=True)
     except sqlite3.IntegrityError:
         await interaction.response.send_message(f"❌ Trigger `{trigger}` already exists.", ephemeral=True)
     finally:
@@ -1294,7 +1296,7 @@ async def autoresponder_edit(interaction: discord.Interaction, trigger: str, mes
     conn.commit()
     conn.close()
     
-    await interaction.response.send_message(f"✅ Autoresponder `{trigger}` updated! (match: {final_match})", ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} Autoresponder `{trigger}` updated! (match: {final_match})", ephemeral=True)
 
 
 @bot.tree.command(name="autoresponder_remove", description="Delete an autoresponder trigger")
@@ -1353,7 +1355,7 @@ async def imageresponder_add(interaction: discord.Interaction, trigger: str, ima
     try:
         cur.execute("INSERT INTO image_responders (guild_id, trigger, image_url, caption, match_type) VALUES (?, ?, ?, ?, ?)", (guild.id, trigger, image_url, caption, match_type))
         conn.commit()
-        await interaction.response.send_message(f"✅ Image responder `{trigger}` created! (match: {match_type})", ephemeral=True)
+        await interaction.response.send_message(f"{CHECK} Image responder `{trigger}` created! (match: {match_type})", ephemeral=True)
     except sqlite3.IntegrityError:
         await interaction.response.send_message(f"❌ Trigger `{trigger}` already exists.", ephemeral=True)
     finally:
@@ -1384,7 +1386,7 @@ async def imageresponder_edit(interaction: discord.Interaction, trigger: str, im
     conn.commit()
     conn.close()
     
-    await interaction.response.send_message(f"✅ Image responder `{trigger}` updated! (match: {final_match})", ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} Image responder `{trigger}` updated! (match: {final_match})", ephemeral=True)
 
 
 @bot.tree.command(name="imageresponder_remove", description="Delete an image responder")
@@ -1442,7 +1444,7 @@ async def waitlist_create(interaction: discord.Interaction, title: str | None = 
     key = get_waitlist_key(interaction.guild.id)
     final_title = title or f"{interaction.guild.name}'s waitlist"
     embed = build_waitlist_embed(interaction.guild, final_title, [], color)
-    await interaction.response.send_message("✅ Waitlist created!", ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} Waitlist created!", ephemeral=True)
     msg = await interaction.channel.send(embed=embed)
     data[key] = {"title": final_title, "color": color, "channel_id": interaction.channel.id, "message_id": msg.id, "users": []}
     save_waitlists(data)
@@ -1467,7 +1469,7 @@ async def waitlist_add(interaction: discord.Interaction, channel: discord.TextCh
     save_waitlists(data)
     await update_waitlist_message(bot, interaction.guild.id)
     suffix = f" — {label}" if label else ""
-    await interaction.response.send_message(f"✅ Added {channel.mention}{suffix}", ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} Added {channel.mention}{suffix}", ephemeral=True)
 
 
 @bot.tree.command(name="waitlist_label", description="Set or update a waitlist entry label")
@@ -1486,7 +1488,7 @@ async def waitlist_label(interaction: discord.Interaction, channel: discord.Text
             entries[i] = {"id": cid, "label": label} if label else cid
             save_waitlists(data)
             await update_waitlist_message(bot, interaction.guild.id)
-            msg = f"✅ Updated label for {channel.mention} → **{label}**" if label else f"✅ Cleared label for {channel.mention}"
+            msg = f"{CHECK} Updated label for {channel.mention} → **{label}**" if label else f"{CHECK} Cleared label for {channel.mention}"
             await interaction.response.send_message(msg, ephemeral=True)
             return
     
@@ -1541,7 +1543,7 @@ async def role_add(interaction: discord.Interaction, user: discord.Member, role:
     
     try:
         await user.add_roles(role)
-        await interaction.response.send_message(f"✅ Added {role.mention} to {user.mention}.")
+        await interaction.response.send_message(f"{CHECK} Added {role.mention} to {user.mention}.")
     except discord.Forbidden:
         await interaction.response.send_message("⚠️ I don't have permission to assign that role.", ephemeral=True)
 
@@ -1557,7 +1559,7 @@ async def role_remove(interaction: discord.Interaction, user: discord.Member, ro
     
     try:
         await user.remove_roles(role)
-        await interaction.response.send_message(f"✅ Removed {role.mention} from {user.mention}.")
+        await interaction.response.send_message(f"{CHECK} Removed {role.mention} from {user.mention}.")
     except discord.Forbidden:
         await interaction.response.send_message("⚠️ I don't have permission to remove that role.", ephemeral=True)
 
@@ -1625,7 +1627,7 @@ async def emoji_steal(interaction: discord.Interaction, emoji: str, name: str | 
                 emoji_data = await resp.read()
         
         created_emoji = await guild.create_custom_emoji(name=emoji_name, image=emoji_data)
-        await interaction.followup.send(f"✅ Emoji stolen! {created_emoji} `{created_emoji.name}`", ephemeral=True)
+        await interaction.followup.send(f"{CHECK} Emoji stolen! {created_emoji} `{created_emoji.name}`", ephemeral=True)
     except discord.Forbidden:
         await interaction.followup.send("❌ I don't have permission to create emojis.", ephemeral=True)
     except Exception as e:
@@ -1670,7 +1672,7 @@ async def sticker_steal(interaction: discord.Interaction, sticker_id: str, name:
             emoji="📌",
             file=discord.File(io.BytesIO(sticker_data), filename=f"{sticker_name}.png")
         )
-        await interaction.followup.send(f"✅ Sticker stolen! **{created_sticker.name}**", ephemeral=True)
+        await interaction.followup.send(f"{CHECK} Sticker stolen! **{created_sticker.name}**", ephemeral=True)
     except discord.Forbidden:
         await interaction.followup.send("❌ I don't have permission to create stickers.", ephemeral=True)
     except Exception as e:
