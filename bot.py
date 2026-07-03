@@ -246,13 +246,32 @@ def clean_input(value):
     return "" if isinstance(value, str) and value.lower() == "none" else value
 
 
+CUSTOM_EMOJI_RE = re.compile(r'^<a?:\w+:\d+>$')
+
+
+def _looks_like_emoji_token(token: str) -> bool:
+    if CUSTOM_EMOJI_RE.match(token):
+        return True
+    # Short unicode emoji (not custom) — heuristic: short and not plain alphanumeric text
+    return len(token) <= 3 and not token.isalnum()
+
+
 def parse_button(button: str | None):
     if not button:
         return None, None
     parts = button.split(" ", 1)
-    if len(parts) > 1 and len(parts[0]) <= 3:
-        return parts[1], parts[0]
-    # No emoji prefix detected — return "" (not None) so upsert_settings
+    first = parts[0]
+
+    if len(parts) > 1 and _looks_like_emoji_token(first):
+        # "<emoji> label text" — split into emoji + label
+        return parts[1], first
+
+    if len(parts) == 1 and _looks_like_emoji_token(first):
+        # Only an emoji was given, no label text — leave label untouched (None)
+        # so the existing label isn't overwritten, and just update the emoji.
+        return None, first
+
+    # No emoji detected — return "" (not None) so upsert_settings
     # actually clears any previously-saved emoji instead of leaving it untouched.
     return button, ""
 
