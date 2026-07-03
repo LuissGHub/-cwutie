@@ -252,7 +252,9 @@ def parse_button(button: str | None):
     parts = button.split(" ", 1)
     if len(parts) > 1 and len(parts[0]) <= 3:
         return parts[1], parts[0]
-    return button, None
+    # No emoji prefix detected — return "" (not None) so upsert_settings
+    # actually clears any previously-saved emoji instead of leaving it untouched.
+    return button, ""
 
 
 def parse_emoji(value: str | None):
@@ -875,14 +877,24 @@ async def embedlist(interaction: discord.Interaction):
         await interaction.response.send_message("No saved embeds yet. Use `/embed save_name:myname` to save one.", ephemeral=True)
         return
     
-    embed = discord.Embed(title="📋 Saved Embeds", color=get_theme_color("pink"))
-    for row in rows:
-        ch = guild.get_channel(row["post_channel_id"]) if row["post_channel_id"] else None
-        ch_text = ch.mention if ch else "*(no channel)*"
-        t_text = f'"{row["embed_title"]}"' if row["embed_title"] else "*(no title)*"
-        embed.add_field(name=f"• {row['name']}", value=f"Title: {t_text}\nChannel: {ch_text}\nUpdated: {row['updated_at'][:10]}", inline=False)
+    # Discord embeds cap out at 25 fields each, so paginate into chunks of 25
+    chunks = [rows[i:i + 25] for i in range(0, len(rows), 25)]
+    embeds = []
+    for idx, chunk in enumerate(chunks, start=1):
+        page_title = f"📋 Saved Embeds (page {idx}/{len(chunks)})" if len(chunks) > 1 else "📋 Saved Embeds"
+        embed = discord.Embed(title=page_title, color=get_theme_color("pink"))
+        for row in chunk:
+            ch = guild.get_channel(row["post_channel_id"]) if row["post_channel_id"] else None
+            ch_text = ch.mention if ch else "*(no channel)*"
+            t_text = f'"{row["embed_title"]}"' if row["embed_title"] else "*(no title)*"
+            embed.add_field(name=f"• {row['name']}", value=f"Title: {t_text}\nChannel: {ch_text}\nUpdated: {row['updated_at'][:10]}", inline=False)
+        embeds.append(embed)
     
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    # Discord also caps messages at 10 embeds each, so batch those too
+    first_batch = embeds[:10]
+    await interaction.response.send_message(embeds=first_batch, ephemeral=True)
+    for i in range(10, len(embeds), 10):
+        await interaction.followup.send(embeds=embeds[i:i + 10], ephemeral=True)
 
 
 @bot.tree.command(name="embedpost", description="Post a saved embed in the current channel")
