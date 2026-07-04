@@ -475,10 +475,10 @@ class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
 
 class BoostEditModal(discord.ui.Modal, title="Edit Boost Settings"):
     boost_title = discord.ui.TextInput(label="Title", required=False, max_length=256, placeholder="e.g.  💖 server boost!")
-    boost_text = discord.ui.TextInput(label="Message — use {mention}, {username}, {server}", style=discord.TextStyle.paragraph, required=False, max_length=2000, placeholder="e.g.  thank you {mention} for boosting {server} ♡")
+    boost_text = discord.ui.TextInput(label="Message", style=discord.TextStyle.paragraph, required=False, max_length=2000, placeholder="Use {mention}, {username}, {server} — e.g. thank you {mention} for boosting {server} ♡")
     theme = discord.ui.TextInput(label="Color — theme name or hex", required=False, max_length=20, default="pink", placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
     image = discord.ui.TextInput(label="Big image URL (bottom of embed)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.gif")
-    thumbnail = discord.ui.TextInput(label="Small image URL — or type 'avatar' to use booster's pfp", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/xyz456.png  or  avatar")
+    thumbnail = discord.ui.TextInput(label="Thumbnail URL (or 'avatar')", required=False, max_length=1000, placeholder="e.g. https://i.imgur.com/xyz456.png, or type: avatar")
 
     def __init__(self, prefill: dict | None = None):
         super().__init__()
