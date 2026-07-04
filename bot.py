@@ -701,6 +701,26 @@ async def on_ready():
             print(f"Guild sync skipped: {e}")
 
 
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Global handler so a bug in a command shows an error instead of a silent
+    'The application did not respond' failure in Discord."""
+    print(f"[COMMAND ERROR] /{interaction.command.name if interaction.command else '?'}: {error!r}")
+
+    if isinstance(error, app_commands.CheckFailure):
+        msg = str(error) or "⚠️ You don't have permission to use this command."
+    else:
+        msg = "⚠️ Something went wrong running that command. It's been logged."
+
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except discord.HTTPException:
+        pass
+
+
 @bot.event
 async def on_member_join(member: discord.Member):
     await asyncio.sleep(1)
@@ -1117,7 +1137,14 @@ async def boost_edit(interaction: discord.Interaction):
         await interaction.response.send_message("Run `/set_boost_channel` first.", ephemeral=True)
         return
     
-    prefill = {"boost_title": settings["boost_title"], "boost_text": settings["boost_text"], "boost_color": settings["boost_color"], "boost_image_url": settings["boost_image_url"], "boost_thumbnail_url": settings["boost_thumbnail_url"]}
+    prefill = {
+        "boost_title": settings["boost_title"],
+        "boost_text": settings["boost_text"],
+        "boost_color": settings["boost_color"],
+        "boost_image_url": settings["boost_image_url"],
+        "boost_thumbnail_url": settings["boost_thumbnail_url"],
+        "boost_use_avatar": settings["boost_use_avatar"],
+    }
     await interaction.response.send_modal(BoostEditModal(prefill=prefill))
 
 
