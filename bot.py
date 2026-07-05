@@ -46,6 +46,7 @@ THEMES = {
 
 SETTINGS_COLUMNS = [
     "welcome_text", "welcome_title", "welcome_banner_url", "welcome_theme", "welcome_thumbnail_url", "welcome_banner2_url",
+    "welcome_outside_text",
     "verify_role_id", "verify_message_id", "verify_channel_id", "verify_button_label", "verify_button_emoji",
     "verify_title", "verify_description", "verify_color", "verify_image_url", "verify_thumbnail_url",
     "verify_success_message", "verify_already_message",
@@ -454,14 +455,17 @@ class EmbedModal(discord.ui.Modal, title="Create Embed"):
 
 
 class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
-    welcome_title = discord.ui.TextInput(label="Title (optional)", required=False, max_length=256, placeholder="e.g.  🐇 welcome to cwtie ugc!")
-    welcome_text = discord.ui.TextInput(label="Welcome message text", style=discord.TextStyle.paragraph, required=True, max_length=2000, placeholder="e.g.  🐇 welcome {mention} to cwtie ugc! ♡")
+    outside_text = discord.ui.TextInput(label="Text ABOVE the embed (optional)", required=False, max_length=2000, placeholder="e.g.  thank you {mention} !")
+    welcome_title = discord.ui.TextInput(label="Embed title (optional)", required=False, max_length=256, placeholder="e.g.  🐇 welcome to cwtie ugc!")
+    welcome_text = discord.ui.TextInput(label="Embed description text", style=discord.TextStyle.paragraph, required=True, max_length=2000, placeholder="e.g.  🐇 welcome {mention} to cwtie ugc! ♡")
     theme = discord.ui.TextInput(label="Color — theme name or hex", required=False, max_length=20, placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
     banner_url = discord.ui.TextInput(label="Banner image URL (big image at bottom)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.gif")
 
     def __init__(self, prefill: dict | None = None):
         super().__init__()
         if prefill:
+            if prefill.get("welcome_outside_text"):
+                self.outside_text.default = prefill["welcome_outside_text"]
             if prefill.get("welcome_title"):
                 self.welcome_title.default = prefill["welcome_title"]
             if prefill.get("welcome_text"):
@@ -474,7 +478,8 @@ class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
     async def on_submit(self, interaction: discord.Interaction):
         guild = guild_only(interaction)
         title_val = str(self.welcome_title).strip()
-        kwargs = {"welcome_text": str(self.welcome_text), "welcome_title": title_val}
+        outside_val = str(self.outside_text).strip()
+        kwargs = {"welcome_text": str(self.welcome_text), "welcome_title": title_val, "welcome_outside_text": outside_val}
         if str(self.theme).strip():
             kwargs["welcome_theme"] = str(self.theme).strip()
         if str(self.banner_url).strip():
@@ -488,7 +493,8 @@ class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
             image=str(self.banner_url) or None,
             user_avatar_url=interaction.user.display_avatar.url,
         )
-        await interaction.response.send_message(f"{CHECK} Welcome settings updated! Here's a preview:", embed=preview, ephemeral=True)
+        preview_content = outside_val.replace("{mention}", interaction.user.mention) if outside_val else None
+        await interaction.response.send_message(f"{CHECK} Welcome settings updated! Here's a preview:", content=preview_content, embed=preview, ephemeral=True)
 
 
 class BoostEditModal(discord.ui.Modal, title="Edit Boost Settings"):
@@ -755,6 +761,9 @@ async def on_member_join(member: discord.Member):
     if title:
         title = title.replace("{mention}", member.mention)
     thumb = settings["welcome_thumbnail_url"] if settings["welcome_thumbnail_url"] else None
+    outside_text = settings["welcome_outside_text"] if settings["welcome_outside_text"] else None
+    if outside_text:
+        outside_text = outside_text.replace("{mention}", member.mention).replace("\\n", "\n")
     embed = build_embed(
         title=title,
         description=description,
@@ -763,7 +772,7 @@ async def on_member_join(member: discord.Member):
         thumbnail=thumb,
         user_avatar_url=member.display_avatar.url if not thumb else None,
     )
-    await channel.send(embed=embed)
+    await channel.send(content=outside_text, embed=embed)
     
     if settings["welcome_banner2_url"]:
         embed2 = build_embed(title=None, description=None, theme=settings["welcome_theme"] or "pink", image=settings["welcome_banner2_url"])
@@ -1267,8 +1276,8 @@ bot.tree.add_command(embedcollection_group)
 
 @bot.tree.command(name="welcome_setup", description="Set up the welcome message")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(welcome_channel="Channel for welcome messages", welcome_text="Message text (use {mention})", title="Embed title (optional, use {mention})", color="Theme or hex", banner_url="Big image URL", thumbnail_url="Small image URL", banner2_url="Second image URL")
-async def welcome_setup(interaction: discord.Interaction, welcome_channel: discord.TextChannel, welcome_text: str, title: str | None = None, color: str = "pink", banner_url: str | None = None, thumbnail_url: str | None = None, banner2_url: str | None = None):
+@app_commands.describe(welcome_channel="Channel for welcome messages", welcome_text="Embed description text (use {mention})", title="Embed title (optional, use {mention})", color="Theme or hex", banner_url="Big image URL", thumbnail_url="Small image URL", banner2_url="Second image URL", outside_text="Plain text ABOVE the embed (use {mention})")
+async def welcome_setup(interaction: discord.Interaction, welcome_channel: discord.TextChannel, welcome_text: str, title: str | None = None, color: str = "pink", banner_url: str | None = None, thumbnail_url: str | None = None, banner2_url: str | None = None, outside_text: str | None = None):
     guild = guild_only(interaction)
     kwargs = dict(welcome_channel_id=welcome_channel.id, welcome_text=welcome_text.replace("\\n", "\n"), welcome_theme=color)
     if title is not None:
@@ -1279,12 +1288,15 @@ async def welcome_setup(interaction: discord.Interaction, welcome_channel: disco
         kwargs["welcome_thumbnail_url"] = thumbnail_url
     if banner2_url is not None:
         kwargs["welcome_banner2_url"] = banner2_url
+    if outside_text is not None:
+        kwargs["welcome_outside_text"] = outside_text.replace("\\n", "\n")
     
     upsert_settings(guild.id, **kwargs)
     thumb = thumbnail_url or None
     preview_title = title.replace("{mention}", interaction.user.mention) if title else None
     preview = build_embed(title=preview_title, description=welcome_text.replace("{mention}", interaction.user.mention), theme=color, image=banner_url, thumbnail=thumb, user_avatar_url=interaction.user.display_avatar.url if not thumb else None)
-    await interaction.response.send_message(f"{CHECK} Welcome message saved! Preview:", embed=preview, ephemeral=True)
+    preview_content = outside_text.replace("{mention}", interaction.user.mention) if outside_text else None
+    await interaction.response.send_message(f"{CHECK} Welcome message saved! Preview:", content=preview_content, embed=preview, ephemeral=True)
     if banner2_url:
         embed2 = build_embed(title=None, description=None, theme=color, image=banner2_url)
         await interaction.followup.send(embed=embed2, ephemeral=True)
@@ -1292,8 +1304,8 @@ async def welcome_setup(interaction: discord.Interaction, welcome_channel: disco
 
 @bot.tree.command(name="welcome_edit", description="Edit the welcome message")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(welcome_text="New message text", title="New embed title ('none' to remove, use {mention})", color="New color", banner_url="New banner URL", thumbnail_url="New thumbnail (or 'none')", banner2_url="New second image (or 'none')")
-async def welcome_edit(interaction: discord.Interaction, welcome_text: str | None = None, title: str | None = None, color: str | None = None, banner_url: str | None = None, thumbnail_url: str | None = None, banner2_url: str | None = None):
+@app_commands.describe(welcome_text="New embed description text", title="New embed title ('none' to remove, use {mention})", color="New color", banner_url="New banner URL", thumbnail_url="New thumbnail (or 'none')", banner2_url="New second image (or 'none')", outside_text="Plain text ABOVE the embed ('none' to remove, use {mention})")
+async def welcome_edit(interaction: discord.Interaction, welcome_text: str | None = None, title: str | None = None, color: str | None = None, banner_url: str | None = None, thumbnail_url: str | None = None, banner2_url: str | None = None, outside_text: str | None = None):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
     if not settings or not settings["welcome_channel_id"]:
@@ -1313,6 +1325,8 @@ async def welcome_edit(interaction: discord.Interaction, welcome_text: str | Non
         kwargs["welcome_thumbnail_url"] = "" if thumbnail_url.lower() == "none" else thumbnail_url
     if banner2_url is not None:
         kwargs["welcome_banner2_url"] = "" if banner2_url.lower() == "none" else banner2_url
+    if outside_text is not None:
+        kwargs["welcome_outside_text"] = "" if outside_text.lower() == "none" else outside_text.replace("\\n", "\n")
     
     if not kwargs:
         await interaction.response.send_message("Provide at least one field to update.", ephemeral=True)
@@ -1330,7 +1344,9 @@ async def welcome_edit(interaction: discord.Interaction, welcome_text: str | Non
         thumbnail=thumb,
         user_avatar_url=interaction.user.display_avatar.url if not thumb else None,
     )
-    await interaction.response.send_message(f"{CHECK} Welcome message updated! Preview:", embed=preview, ephemeral=True)
+    updated_outside = updated["welcome_outside_text"] if updated["welcome_outside_text"] else None
+    preview_content = updated_outside.replace("{mention}", interaction.user.mention) if updated_outside else None
+    await interaction.response.send_message(f"{CHECK} Welcome message updated! Preview:", content=preview_content, embed=preview, ephemeral=True)
     if updated["welcome_banner2_url"]:
         embed2 = build_embed(title=None, description=None, theme=updated["welcome_theme"] or "pink", image=updated["welcome_banner2_url"])
         await interaction.followup.send(embed=embed2, ephemeral=True)
@@ -1350,8 +1366,11 @@ async def welcome_test(interaction: discord.Interaction):
     if title:
         title = title.replace("{mention}", interaction.user.mention)
     thumb = settings["welcome_thumbnail_url"] if settings["welcome_thumbnail_url"] else None
+    outside_text = settings["welcome_outside_text"] if settings["welcome_outside_text"] else None
+    if outside_text:
+        outside_text = outside_text.replace("{mention}", interaction.user.mention)
     embed = build_embed(title=title, description=description, theme=settings["welcome_theme"] or "pink", image=settings["welcome_banner_url"], thumbnail=thumb, user_avatar_url=interaction.user.display_avatar.url if not thumb else None)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(content=outside_text, embed=embed, ephemeral=True)
     if settings["welcome_banner2_url"]:
         embed2 = build_embed(title=None, description=None, theme=settings["welcome_theme"] or "pink", image=settings["welcome_banner2_url"])
         await interaction.followup.send(embed=embed2, ephemeral=True)
