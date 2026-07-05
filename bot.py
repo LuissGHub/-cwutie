@@ -1296,7 +1296,9 @@ async def welcome_setup(interaction: discord.Interaction, welcome_channel: disco
     preview_title = title.replace("{mention}", interaction.user.mention) if title else None
     preview = build_embed(title=preview_title, description=welcome_text.replace("{mention}", interaction.user.mention), theme=color, image=banner_url, thumbnail=thumb, user_avatar_url=interaction.user.display_avatar.url if not thumb else None)
     preview_content = outside_text.replace("{mention}", interaction.user.mention) if outside_text else None
-    await interaction.response.send_message(f"{CHECK} Welcome message saved! Preview:", content=preview_content, embed=preview, ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} Welcome message saved! Preview:", embed=preview, ephemeral=True)
+    if preview_content:
+        await interaction.followup.send(content=preview_content, ephemeral=True)
     if banner2_url:
         embed2 = build_embed(title=None, description=None, theme=color, image=banner2_url)
         await interaction.followup.send(embed=embed2, ephemeral=True)
@@ -1346,7 +1348,9 @@ async def welcome_edit(interaction: discord.Interaction, welcome_text: str | Non
     )
     updated_outside = updated["welcome_outside_text"] if updated["welcome_outside_text"] else None
     preview_content = updated_outside.replace("{mention}", interaction.user.mention) if updated_outside else None
-    await interaction.response.send_message(f"{CHECK} Welcome message updated! Preview:", content=preview_content, embed=preview, ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} Welcome message updated! Preview:", embed=preview, ephemeral=True)
+    if preview_content:
+        await interaction.followup.send(content=preview_content, ephemeral=True)
     if updated["welcome_banner2_url"]:
         embed2 = build_embed(title=None, description=None, theme=updated["welcome_theme"] or "pink", image=updated["welcome_banner2_url"])
         await interaction.followup.send(embed=embed2, ephemeral=True)
