@@ -1424,6 +1424,9 @@ async def boost_edit(interaction: discord.Interaction, message: str | None = Non
         thumbnail=None,
         user_avatar_url=None,
     )
+    message_text = f"{CHECK} Boost settings updated! Here's a preview:"
+    if preview_content:
+        message_text = f"{message_text}\n{preview_content}"
     if banner2_url:
         embed2 = build_embed(
             title=None,
@@ -1431,9 +1434,9 @@ async def boost_edit(interaction: discord.Interaction, message: str | None = Non
             theme=color or settings["boost_color"] or "pink",
             image=banner2_url,
         )
-        await interaction.response.send_message(f"{CHECK} Boost settings updated! Here's a preview:", content=preview_content, embeds=[embed, embed2], ephemeral=True)
+        await interaction.response.send_message(message_text, embeds=[embed, embed2], ephemeral=True)
     else:
-        await interaction.response.send_message(f"{CHECK} Boost settings updated! Here's a preview:", content=preview_content, embed=embed, ephemeral=True)
+        await interaction.response.send_message(message_text, embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="test_boost", description="Preview the boost message")
