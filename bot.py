@@ -50,7 +50,7 @@ SETTINGS_COLUMNS = [
     "verify_role_id", "verify_message_id", "verify_channel_id", "verify_button_label", "verify_button_emoji",
     "verify_title", "verify_description", "verify_color", "verify_image_url", "verify_thumbnail_url",
     "verify_success_message", "verify_already_message",
-    "boost_channel_id", "boost_text", "boost_title", "boost_color", "boost_image_url", "boost_thumbnail_url", "boost_use_avatar",
+    "boost_channel_id", "boost_text", "boost_outside_text", "boost_title", "boost_color", "boost_image_url", "boost_thumbnail_url", "boost_use_avatar",
     "vouch_channel_id", "vouch_reaction_emoji", "vouch_super_reaction",
 ]
 
@@ -500,6 +500,7 @@ class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
 class BoostEditModal(discord.ui.Modal, title="Edit Boost Settings"):
     boost_title = discord.ui.TextInput(label="Title", required=False, max_length=256, placeholder="e.g.  💖 server boost!")
     boost_text = discord.ui.TextInput(label="Message", style=discord.TextStyle.paragraph, required=False, max_length=2000, placeholder="Use {mention}, {username}, {server} — e.g. thank you {mention} for boosting {server} ♡")
+    outside_text = discord.ui.TextInput(label="Text ABOVE the embed (optional)", required=False, max_length=2000, placeholder="e.g.  thank you {mention} for boosting {server} ♡")
     theme = discord.ui.TextInput(label="Color — theme name or hex", required=False, max_length=20, default="pink", placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
     image = discord.ui.TextInput(label="Big image URL (bottom of embed)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.gif")
     thumbnail = discord.ui.TextInput(label="Thumbnail URL (or 'avatar')", required=False, max_length=1000, placeholder="e.g. https://i.imgur.com/xyz456.png, or type: avatar")
@@ -511,6 +512,8 @@ class BoostEditModal(discord.ui.Modal, title="Edit Boost Settings"):
                 self.boost_title.default = prefill["boost_title"]
             if prefill.get("boost_text"):
                 self.boost_text.default = prefill["boost_text"]
+            if prefill.get("boost_outside_text"):
+                self.outside_text.default = prefill["boost_outside_text"]
             if prefill.get("boost_color"):
                 self.theme.default = prefill["boost_color"]
             if prefill.get("boost_image_url"):
@@ -527,6 +530,7 @@ class BoostEditModal(discord.ui.Modal, title="Edit Boost Settings"):
             updates["boost_title"] = str(self.boost_title).strip()
         if str(self.boost_text).strip():
             updates["boost_text"] = str(self.boost_text).strip()
+        updates["boost_outside_text"] = str(self.outside_text).strip()
         if str(self.theme).strip():
             updates["boost_color"] = str(self.theme).strip()
         if str(self.image).strip():
@@ -545,6 +549,9 @@ class BoostEditModal(discord.ui.Modal, title="Edit Boost Settings"):
         
         thumb = None if use_av else (str(self.thumbnail).strip() or None)
         preview_text = (str(self.boost_text).strip() or "thank you {mention} for boosting! ♡").replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
+        preview_content = (str(self.outside_text).strip() or None)
+        if preview_content:
+            preview_content = preview_content.replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
         embed = build_embed(
             title=str(self.boost_title).strip() or None,
             description=preview_text,
@@ -553,7 +560,7 @@ class BoostEditModal(discord.ui.Modal, title="Edit Boost Settings"):
             thumbnail=thumb,
             user_avatar_url=interaction.user.display_avatar.url if use_av else None
         )
-        await interaction.response.send_message(f"{CHECK} Boost settings updated! Here's a preview:", embed=embed, ephemeral=True)
+        await interaction.response.send_message(f"{CHECK} Boost settings updated! Here's a preview:", content=preview_content, embed=embed, ephemeral=True)
 
 
 # ———————————————––
@@ -791,6 +798,9 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             return
         
         text = (settings["boost_text"] or "thank you {mention} for boosting! ♡").replace("{mention}", after.mention).replace("{username}", after.name).replace("{server}", after.guild.name)
+        outside_text = settings["boost_outside_text"] if settings["boost_outside_text"] else None
+        if outside_text:
+            outside_text = outside_text.replace("{mention}", after.mention).replace("{username}", after.name).replace("{server}", after.guild.name).replace("\\n", "\n")
         use_av = settings["boost_use_avatar"] == "1" if settings["boost_use_avatar"] else False
         thumb = settings["boost_thumbnail_url"] or None
         embed = build_embed(
@@ -801,7 +811,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             thumbnail=None if use_av else thumb,
             user_avatar_url=after.display_avatar.url if use_av else None
         )
-        await channel.send(embed=embed)
+        await channel.send(content=outside_text, embed=embed)
 
 
 @bot.event
@@ -1401,10 +1411,12 @@ async def set_boost_channel(interaction: discord.Interaction, channel: discord.T
 
 @bot.tree.command(name="set_boost_message", description="Set the boost message")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(message="Message (use {mention}, {username}, {server})", title="Title", color="Color", image="Big image", thumbnail="Small image", use_avatar="Use booster's avatar")
-async def set_boost_message(interaction: discord.Interaction, message: str, title: str | None = None, color: str = "pink", image: str | None = None, thumbnail: str | None = None, use_avatar: bool = False):
+@app_commands.describe(message="Message (use {mention}, {username}, {server})", outside_text="Text above the embed (use {mention}, {username}, {server})", title="Title", color="Color", image="Big image", thumbnail="Small image", use_avatar="Use booster's avatar")
+async def set_boost_message(interaction: discord.Interaction, message: str, outside_text: str | None = None, title: str | None = None, color: str = "pink", image: str | None = None, thumbnail: str | None = None, use_avatar: bool = False):
     guild = guild_only(interaction)
     updates = dict(boost_text=message.replace("\\n", "\n"), boost_color=color, boost_use_avatar="1" if use_avatar else "0")
+    if outside_text is not None:
+        updates["boost_outside_text"] = outside_text.replace("\\n", "\n")
     if title:
         updates["boost_title"] = title
     if image:
@@ -1415,8 +1427,11 @@ async def set_boost_message(interaction: discord.Interaction, message: str, titl
     upsert_settings(guild.id, **updates)
     thumb = thumbnail or None
     preview_text = message.replace("\\n", "\n").replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
+    preview_content = None
+    if outside_text is not None:
+        preview_content = outside_text.replace("\\n", "\n").replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
     embed = build_embed(title=title, description=preview_text, theme=color, image=image, thumbnail=None if use_avatar else thumb, user_avatar_url=interaction.user.display_avatar.url if use_avatar else None)
-    await interaction.response.send_message(f"{CHECK} Boost message saved! Preview:", embed=embed, ephemeral=True)
+    await interaction.response.send_message(f"{CHECK} Boost message saved! Preview:", content=preview_content, embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="boost_edit", description="Edit boost settings")
@@ -1431,6 +1446,7 @@ async def boost_edit(interaction: discord.Interaction):
     prefill = {
         "boost_title": settings["boost_title"],
         "boost_text": settings["boost_text"],
+        "boost_outside_text": settings["boost_outside_text"],
         "boost_color": settings["boost_color"],
         "boost_image_url": settings["boost_image_url"],
         "boost_thumbnail_url": settings["boost_thumbnail_url"],
@@ -1449,8 +1465,11 @@ async def test_boost(interaction: discord.Interaction):
         return
     
     text = (settings["boost_text"] or "thank you {mention} for boosting! ♡").replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
+    outside_text = settings["boost_outside_text"] if settings["boost_outside_text"] else None
+    if outside_text:
+        outside_text = outside_text.replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name).replace("\\n", "\n")
     embed = build_embed(title=settings["boost_title"], description=text, theme=settings["boost_color"] or "pink", image=settings["boost_image_url"], thumbnail=settings["boost_thumbnail_url"], user_avatar_url=interaction.user.display_avatar.url if not settings["boost_thumbnail_url"] else None)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(content=outside_text, embed=embed, ephemeral=True)
 
 
 # ———————————————––
