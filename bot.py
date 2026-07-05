@@ -1386,8 +1386,8 @@ async def set_boost_message(interaction: discord.Interaction, message: str, outs
 
 @bot.tree.command(name="boost_edit", description="Edit boost settings")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(message="New boost message", outside_text="Text above the embed", title="New title", color="Color theme or hex", image="Banner image URL")
-async def boost_edit(interaction: discord.Interaction, message: str | None = None, outside_text: str | None = None, title: str | None = None, color: str | None = None, image: str | None = None):
+@app_commands.describe(message="New boost message", outside_text="Text above the embed", title="New title", color="Color theme or hex", image="Banner image URL", banner2_url="Second banner image URL")
+async def boost_edit(interaction: discord.Interaction, message: str | None = None, outside_text: str | None = None, title: str | None = None, color: str | None = None, image: str | None = None, banner2_url: str | None = None):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
     if not settings or not settings["boost_channel_id"]:
@@ -1405,6 +1405,8 @@ async def boost_edit(interaction: discord.Interaction, message: str | None = Non
         updates["boost_color"] = color
     if image is not None:
         updates["boost_image_url"] = image
+    if banner2_url is not None:
+        updates["boost_banner2_url"] = banner2_url
 
     if updates:
         upsert_settings(guild.id, **updates)
@@ -1422,7 +1424,16 @@ async def boost_edit(interaction: discord.Interaction, message: str | None = Non
         thumbnail=None,
         user_avatar_url=None,
     )
-    await interaction.response.send_message(f"{CHECK} Boost settings updated! Here's a preview:", content=preview_content, embed=embed, ephemeral=True)
+    if banner2_url:
+        embed2 = build_embed(
+            title=None,
+            description=None,
+            theme=color or settings["boost_color"] or "pink",
+            image=banner2_url,
+        )
+        await interaction.response.send_message(f"{CHECK} Boost settings updated! Here's a preview:", content=preview_content, embeds=[embed, embed2], ephemeral=True)
+    else:
+        await interaction.response.send_message(f"{CHECK} Boost settings updated! Here's a preview:", content=preview_content, embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="test_boost", description="Preview the boost message")
