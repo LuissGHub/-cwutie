@@ -502,9 +502,8 @@ class BoostEditModal(discord.ui.Modal, title="Edit Boost Settings"):
     boost_title = discord.ui.TextInput(label="Title", required=False, max_length=256, placeholder="e.g.  💖 server boost!")
     boost_text = discord.ui.TextInput(label="Message", style=discord.TextStyle.paragraph, required=False, max_length=2000, placeholder="Use {mention}, {username}, {server} — e.g. thank you {mention} for boosting {server} ♡")
     outside_text = discord.ui.TextInput(label="Text ABOVE the embed (optional)", required=False, max_length=2000, placeholder="e.g.  thank you {mention} for boosting {server} ♡")
-    image = discord.ui.TextInput(label="Big image URL (bottom of embed)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.gif")
-    banner2 = discord.ui.TextInput(label="Second banner URL (optional)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/def456.gif")
-    thumbnail = discord.ui.TextInput(label="Thumbnail URL (or 'avatar')", required=False, max_length=1000, placeholder="e.g. https://i.imgur.com/xyz456.png, or type: avatar")
+    theme = discord.ui.TextInput(label="Color — theme name or hex", required=False, max_length=20, placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
+    image = discord.ui.TextInput(label="Banner image URL", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.gif")
 
     def __init__(self, prefill: dict | None = None):
         super().__init__()
@@ -515,14 +514,10 @@ class BoostEditModal(discord.ui.Modal, title="Edit Boost Settings"):
                 self.boost_text.default = prefill["boost_text"]
             if prefill.get("boost_outside_text"):
                 self.outside_text.default = prefill["boost_outside_text"]
+            if prefill.get("boost_color"):
+                self.theme.default = prefill["boost_color"]
             if prefill.get("boost_image_url"):
                 self.image.default = prefill["boost_image_url"]
-            if prefill.get("boost_banner2_url"):
-                self.banner2.default = prefill["boost_banner2_url"]
-            if prefill.get("boost_thumbnail_url"):
-                self.thumbnail.default = prefill["boost_thumbnail_url"]
-            if prefill.get("boost_use_avatar") == "1":
-                self.thumbnail.default = "avatar"
 
     async def on_submit(self, interaction: discord.Interaction):
         guild = guild_only(interaction)
@@ -532,29 +527,18 @@ class BoostEditModal(discord.ui.Modal, title="Edit Boost Settings"):
         if str(self.boost_text).strip():
             updates["boost_text"] = str(self.boost_text).strip()
         updates["boost_outside_text"] = str(self.outside_text).strip()
-        # Keep existing color if user didn't provide a new one (modal no longer asks for color)
+        if str(self.theme).strip():
+            updates["boost_color"] = str(self.theme).strip()
         if str(self.image).strip():
             updates["boost_image_url"] = str(self.image).strip()
-        if str(self.banner2).strip():
-            updates["boost_banner2_url"] = str(self.banner2).strip()
-        
-        use_av = str(self.thumbnail).strip().lower() == "avatar"
-        if use_av:
-            updates["boost_use_avatar"] = "1"
-            updates["boost_thumbnail_url"] = ""
-        elif str(self.thumbnail).strip():
-            updates["boost_use_avatar"] = "0"
-            updates["boost_thumbnail_url"] = str(self.thumbnail).strip()
-        
+
         if updates:
             upsert_settings(guild.id, **updates)
-        
-        thumb = None if use_av else (str(self.thumbnail).strip() or None)
+
         preview_text = (str(self.boost_text).strip() or "thank you {mention} for boosting! ♡").replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
         preview_content = (str(self.outside_text).strip() or None)
         if preview_content:
             preview_content = preview_content.replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
-        # Use existing saved color (if any) or default to pink
         current_settings = get_settings(guild.id)
         color_val = (current_settings["boost_color"] if current_settings and current_settings["boost_color"] else "pink")
         embed = build_embed(
@@ -562,19 +546,10 @@ class BoostEditModal(discord.ui.Modal, title="Edit Boost Settings"):
             description=preview_text,
             theme=color_val,
             image=str(self.image).strip() or None,
-            thumbnail=thumb,
-            user_avatar_url=interaction.user.display_avatar.url if use_av else None
+            thumbnail=None,
+            user_avatar_url=None,
         )
-        if str(self.banner2).strip():
-            embed2 = build_embed(
-                title=None,
-                description=None,
-                theme=color_val,
-                image=str(self.banner2).strip() or None,
-            )
-            await interaction.response.send_message(f"{CHECK} Boost settings updated! Here's a preview:", content=preview_content, embeds=[embed, embed2], ephemeral=True)
-        else:
-            await interaction.response.send_message(f"{CHECK} Boost settings updated! Here's a preview:", content=preview_content, embed=embed, ephemeral=True)
+        await interaction.response.send_message(f"{CHECK} Boost settings updated! Here's a preview:", content=preview_content, embed=embed, ephemeral=True)
 
 
 # ———————————————––
