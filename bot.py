@@ -498,60 +498,6 @@ class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
         await interaction.response.send_message(f"{CHECK} Welcome settings updated! Here's a preview:", content=preview_content, embed=preview, ephemeral=True)
 
 
-class BoostEditModal(discord.ui.Modal, title="Edit Boost Settings"):
-    boost_title = discord.ui.TextInput(label="Title", required=False, max_length=256, placeholder="e.g.  💖 server boost!")
-    boost_text = discord.ui.TextInput(label="Message", style=discord.TextStyle.paragraph, required=False, max_length=2000, placeholder="Use {mention}, {username}, {server} — e.g. thank you {mention} for boosting {server} ♡")
-    outside_text = discord.ui.TextInput(label="Text ABOVE the embed (optional)", required=False, max_length=2000, placeholder="e.g.  thank you {mention} for boosting {server} ♡")
-    theme = discord.ui.TextInput(label="Color — theme name or hex", required=False, max_length=20, placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
-    image = discord.ui.TextInput(label="Banner image URL", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.gif")
-
-    def __init__(self, prefill: dict | None = None):
-        super().__init__()
-        if prefill:
-            if prefill.get("boost_title"):
-                self.boost_title.default = prefill["boost_title"]
-            if prefill.get("boost_text"):
-                self.boost_text.default = prefill["boost_text"]
-            if prefill.get("boost_outside_text"):
-                self.outside_text.default = prefill["boost_outside_text"]
-            if prefill.get("boost_color"):
-                self.theme.default = prefill["boost_color"]
-            if prefill.get("boost_image_url"):
-                self.image.default = prefill["boost_image_url"]
-
-    async def on_submit(self, interaction: discord.Interaction):
-        guild = guild_only(interaction)
-        updates = {}
-        if str(self.boost_title).strip():
-            updates["boost_title"] = str(self.boost_title).strip()
-        if str(self.boost_text).strip():
-            updates["boost_text"] = str(self.boost_text).strip()
-        updates["boost_outside_text"] = str(self.outside_text).strip()
-        if str(self.theme).strip():
-            updates["boost_color"] = str(self.theme).strip()
-        if str(self.image).strip():
-            updates["boost_image_url"] = str(self.image).strip()
-
-        if updates:
-            upsert_settings(guild.id, **updates)
-
-        preview_text = (str(self.boost_text).strip() or "thank you {mention} for boosting! ♡").replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
-        preview_content = (str(self.outside_text).strip() or None)
-        if preview_content:
-            preview_content = preview_content.replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
-        current_settings = get_settings(guild.id)
-        color_val = (current_settings["boost_color"] if current_settings and current_settings["boost_color"] else "pink")
-        embed = build_embed(
-            title=str(self.boost_title).strip() or None,
-            description=preview_text,
-            theme=color_val,
-            image=str(self.image).strip() or None,
-            thumbnail=None,
-            user_avatar_url=None,
-        )
-        await interaction.response.send_message(f"{CHECK} Boost settings updated! Here's a preview:", content=preview_content, embed=embed, ephemeral=True)
-
-
 # ———————————————––
 # Verify Views
 # ———————————————––
@@ -1440,24 +1386,43 @@ async def set_boost_message(interaction: discord.Interaction, message: str, outs
 
 @bot.tree.command(name="boost_edit", description="Edit boost settings")
 @app_commands.checks.has_permissions(manage_guild=True)
-async def boost_edit(interaction: discord.Interaction):
+@app_commands.describe(message="New boost message", outside_text="Text above the embed", title="New title", color="Color theme or hex", image="Banner image URL")
+async def boost_edit(interaction: discord.Interaction, message: str | None = None, outside_text: str | None = None, title: str | None = None, color: str | None = None, image: str | None = None):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
     if not settings or not settings["boost_channel_id"]:
         await interaction.response.send_message("Run `/set_boost_channel` first.", ephemeral=True)
         return
-    
-    prefill = {
-        "boost_title": settings["boost_title"],
-        "boost_text": settings["boost_text"],
-        "boost_outside_text": settings["boost_outside_text"],
-        "boost_color": settings["boost_color"],
-        "boost_image_url": settings["boost_image_url"],
-        "boost_banner2_url": settings["boost_banner2_url"],
-        "boost_thumbnail_url": settings["boost_thumbnail_url"],
-        "boost_use_avatar": settings["boost_use_avatar"],
-    }
-    await interaction.response.send_modal(BoostEditModal(prefill=prefill))
+
+    updates = {}
+    if message is not None:
+        updates["boost_text"] = message.replace("\\n", "\n")
+    if outside_text is not None:
+        updates["boost_outside_text"] = outside_text.replace("\\n", "\n")
+    if title is not None:
+        updates["boost_title"] = title
+    if color is not None:
+        updates["boost_color"] = color
+    if image is not None:
+        updates["boost_image_url"] = image
+
+    if updates:
+        upsert_settings(guild.id, **updates)
+
+    preview_text = (message or settings["boost_text"] or "thank you {mention} for boosting! ♡").replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
+    preview_content = (outside_text or settings["boost_outside_text"] or None)
+    if preview_content:
+        preview_content = preview_content.replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
+
+    embed = build_embed(
+        title=title or settings["boost_title"] or None,
+        description=preview_text,
+        theme=color or settings["boost_color"] or "pink",
+        image=image or settings["boost_image_url"] or None,
+        thumbnail=None,
+        user_avatar_url=None,
+    )
+    await interaction.response.send_message(f"{CHECK} Boost settings updated! Here's a preview:", content=preview_content, embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="test_boost", description="Preview the boost message")
