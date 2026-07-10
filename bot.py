@@ -1954,7 +1954,7 @@ async def lim_command(interaction: discord.Interaction, code: str):
         await interaction.response.send_message("No redeem template set yet. Use `/lim_set` first.", ephemeral=True)
         return
 
-    filled = row["template"].replace("{code}", f"**{code}**")
+    filled = row["template"].replace("{code}", f"__{code}__")
     if len(filled) > 2000:
         await interaction.response.send_message("⚠️ That message is too long to send (Discord's 2000 character limit). Trim the template or the code.", ephemeral=True)
         return
