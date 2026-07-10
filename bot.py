@@ -52,6 +52,7 @@ SETTINGS_COLUMNS = [
     "verify_success_message", "verify_already_message",
     "boost_channel_id", "boost_text", "boost_outside_text", "boost_title", "boost_color", "boost_image_url", "boost_banner2_url", "boost_thumbnail_url", "boost_use_avatar",
     "vouch_channel_id", "vouch_reaction_emoji", "vouch_super_reaction",
+    "ticket_category_id", "ticket_name_prefix",
 ]
 
 # ———————————————––
@@ -370,6 +371,47 @@ async def update_waitlist_message(bot, guild_id: int):
         pass
 
 
+async def add_waitlist_entry_for_channel(bot, guild_id: int, channel_id: int) -> bool:
+    """Adds a channel to the guild's waitlist (if one exists and it isn't
+    already in there) and refreshes the waitlist embed. Returns True if an
+    entry was actually added."""
+    data = load_waitlists()
+    key = get_waitlist_key(guild_id)
+    if key not in data:
+        return False
+
+    cid = str(channel_id)
+    entries = data[key]["users"]
+    if any(entry_id(e) == cid for e in entries):
+        return False
+
+    entries.append(cid)
+    save_waitlists(data)
+    await update_waitlist_message(bot, guild_id)
+    return True
+
+
+async def remove_waitlist_entry_by_channel(bot, guild_id: int, channel_id: int) -> bool:
+    """Removes a channel from the guild's waitlist (if present) and refreshes
+    the waitlist embed. Returns True if an entry was actually removed."""
+    data = load_waitlists()
+    key = get_waitlist_key(guild_id)
+    if key not in data:
+        return False
+
+    cid = str(channel_id)
+    entries = data[key]["users"]
+    new_entries = [e for e in entries if entry_id(e) != cid]
+
+    if len(new_entries) == len(entries):
+        return False
+
+    data[key]["users"] = new_entries
+    save_waitlists(data)
+    await update_waitlist_message(bot, guild_id)
+    return True
+
+
 # ———————————————––
 # Modals
 # ———————————————––
@@ -685,6 +727,43 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             await interaction.response.send_message(msg, ephemeral=True)
     except discord.HTTPException:
         pass
+
+
+@bot.event
+async def on_guild_channel_create(channel: discord.abc.GuildChannel):
+    """Fires whenever a new channel is created — which is how your ticket bot's
+    tickets show up. If the channel lands in the configured ticket category
+    and matches the configured name prefix, add it to the waitlist automatically."""
+    if not isinstance(channel, discord.TextChannel):
+        return
+
+    settings = get_settings(channel.guild.id)
+    if not settings or not settings["ticket_category_id"] or not settings["ticket_name_prefix"]:
+        return
+
+    if not channel.category or str(channel.category.id) != str(settings["ticket_category_id"]):
+        return
+
+    if not channel.name.lower().startswith(settings["ticket_name_prefix"].lower()):
+        return
+
+    try:
+        await add_waitlist_entry_for_channel(bot, channel.guild.id, channel.id)
+    except Exception as e:
+        print(f"[DEBUG] Failed to auto-add waitlist entry for new ticket channel {channel.id}: {e}")
+
+
+@bot.event
+async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
+    """Fires whenever a channel is deleted — which is how a 'closed ticket'
+    actually disappears on this setup. If that channel was sitting in the
+    guild's waitlist, drop it and refresh the waitlist embed automatically."""
+    if not isinstance(channel, discord.TextChannel):
+        return
+    try:
+        await remove_waitlist_entry_by_channel(bot, channel.guild.id, channel.id)
+    except Exception as e:
+        print(f"[DEBUG] Failed to auto-remove waitlist entry for deleted channel {channel.id}: {e}")
 
 
 @bot.event
@@ -1861,6 +1940,26 @@ async def waitlist_remove(interaction: discord.Interaction):
     
     view = WaitlistRemoveView(interaction.guild, data[key]["users"])
     await interaction.response.send_message("Select a channel to remove:", view=view, ephemeral=True)
+
+
+@bot.tree.command(name="waitlist_ticket_config", description="Auto-add new ticket channels to the waitlist")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(category="Category your ticket bot creates tickets under", prefix="Name prefix tickets start with (e.g. ticket-)")
+async def waitlist_ticket_config(interaction: discord.Interaction, category: discord.CategoryChannel, prefix: str):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, ticket_category_id=str(category.id), ticket_name_prefix=prefix.strip())
+    await interaction.response.send_message(
+        f"{CHECK} New channels created under **{category.name}** starting with `{prefix.strip()}` will be added to the waitlist automatically.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="waitlist_ticket_config_clear", description="Turn off auto-adding new tickets to the waitlist")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def waitlist_ticket_config_clear(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, ticket_category_id="", ticket_name_prefix="")
+    await interaction.response.send_message(f"{CHECK} Auto-adding new tickets to the waitlist is now off.", ephemeral=True)
 
 
 @bot.tree.command(name="waitlist_move", description="Reorder an entry in the waitlist")
