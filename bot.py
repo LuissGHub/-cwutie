@@ -168,6 +168,20 @@ def init_db() -> None:
         """
     )
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS redeem_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            template TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(guild_id, name)
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -538,6 +552,51 @@ class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
         )
         preview_content = outside_val.replace("{mention}", interaction.user.mention) if outside_val else None
         await interaction.response.send_message(f"{CHECK} Welcome settings updated! Here's a preview:", content=preview_content, embed=preview, ephemeral=True)
+
+
+class RedeemTemplateModal(discord.ui.Modal, title="Redeem Message Template"):
+    template = discord.ui.TextInput(
+        label="Message — use {code} where the code goes",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=1900,
+        placeholder="e.g.  ...your code is {code}...",
+    )
+
+    def __init__(self, name: str, prefill: str | None = None):
+        super().__init__()
+        self.name = name
+        if prefill:
+            self.template.default = prefill
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild_id = interaction.guild_id
+        template_val = str(self.template)
+        now = datetime.now(timezone.utc).isoformat()
+
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM redeem_templates WHERE guild_id = ? AND name = ?", (guild_id, self.name))
+        existing = cur.fetchone()
+        if existing:
+            cur.execute(
+                "UPDATE redeem_templates SET template = ?, updated_at = ? WHERE guild_id = ? AND name = ?",
+                (template_val, now, guild_id, self.name),
+            )
+            action = "updated"
+        else:
+            cur.execute(
+                "INSERT INTO redeem_templates (guild_id, name, template, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (guild_id, self.name, template_val, now, now),
+            )
+            action = "saved"
+        conn.commit()
+        conn.close()
+
+        msg = f"{CHECK} Redeem template {action}! Use `/lim code:<the code>` to send it."
+        if "{code}" not in template_val:
+            msg += "\n⚠️ Heads up — I didn't see `{code}` anywhere in that template, so any code you pass into `/redeem` won't actually show up."
+        await interaction.response.send_message(msg, ephemeral=True)
 
 
 # ———————————————––
@@ -1860,6 +1919,47 @@ async def imageresponder_list(interaction: discord.Interaction):
         embed.add_field(name=f"`{row['trigger']}` — {row['match_type'] or 'exact'}", value=f"[image]({row['image_url']}){caption_text}", inline=False)
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ———————————————––
+# Commands — Lim (redeem message template)
+# ———————————————––
+
+LIM_TEMPLATE_NAME = "default"
+
+@bot.tree.command(name="lim_set", description="Set the redeem message template (use {code} as the placeholder)")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def lim_set(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT template FROM redeem_templates WHERE guild_id = ? AND name = ?", (guild.id, LIM_TEMPLATE_NAME))
+    row = cur.fetchone()
+    conn.close()
+    prefill = row["template"] if row else None
+    await interaction.response.send_modal(RedeemTemplateModal(name=LIM_TEMPLATE_NAME, prefill=prefill))
+
+
+@bot.tree.command(name="lim", description="Send the redeem message with the code filled in")
+@app_commands.describe(code="The code to insert in place of {code}")
+async def lim_command(interaction: discord.Interaction, code: str):
+    guild = guild_only(interaction)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT template FROM redeem_templates WHERE guild_id = ? AND name = ?", (guild.id, LIM_TEMPLATE_NAME))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        await interaction.response.send_message("No redeem template set yet. Use `/lim_set` first.", ephemeral=True)
+        return
+
+    filled = row["template"].replace("{code}", code)
+    if len(filled) > 2000:
+        await interaction.response.send_message("⚠️ That message is too long to send (Discord's 2000 character limit). Trim the template or the code.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(filled)
 
 
 # ———————————————––
