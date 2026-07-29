@@ -35,6 +35,13 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 CHECK = "<a:0000:1488556886918824068>"
 
+# Delay (seconds) before auto-reacting / reposting a sticky message. Discord
+# sometimes drops a reaction/edit that lands the instant a message is sent
+# (client hasn't finished rendering it yet), which looks like the emoji
+# "disappearing." Waiting a beat before acting lets the message settle first.
+AUTOREACT_DELAY_SECONDS = 2
+STICKY_DELAY_SECONDS = 2
+
 THEMES = {
     "pink": 0xF7CFE3,
     "blue": 0xCFEFFF,
@@ -968,6 +975,10 @@ async def on_message(message: discord.Message):
                 super_reaction = settings["autoreact_super_reaction"] == "1"
                 if reaction_emojis:
                     emoji_list = [e.strip() for e in reaction_emojis.split(",") if e.strip()]
+                    # Give the message a moment to fully land client-side before
+                    # reacting — reacting instantly can cause the reaction to
+                    # flash and then disappear on some clients.
+                    await asyncio.sleep(AUTOREACT_DELAY_SECONDS)
                     for emoji in emoji_list:
                         try:
                             await message.add_reaction(emoji)
@@ -1027,6 +1038,10 @@ async def on_message(message: discord.Message):
             await old_msg.delete()
         except Exception:
             pass
+
+    # Wait a beat before reposting so the sticky doesn't immediately jump back
+    # to the bottom while people are still typing/reading the channel.
+    await asyncio.sleep(STICKY_DELAY_SECONDS)
 
     new_msg = await message.channel.send(row["message"].replace("\\n", "\n").replace("{mention}", message.author.mention))
 
