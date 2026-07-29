@@ -51,7 +51,7 @@ SETTINGS_COLUMNS = [
     "verify_title", "verify_description", "verify_color", "verify_image_url", "verify_thumbnail_url",
     "verify_success_message", "verify_already_message",
     "boost_channel_id", "boost_text", "boost_outside_text", "boost_title", "boost_color", "boost_image_url", "boost_banner2_url", "boost_thumbnail_url", "boost_use_avatar",
-    "vouch_channel_id", "vouch_reaction_emoji", "vouch_super_reaction",
+    "autoreact_channel_id", "autoreact_reaction_emoji", "autoreact_super_reaction",
     "ticket_category_id", "ticket_name_prefix",
 ]
 
@@ -93,6 +93,22 @@ def init_db() -> None:
             cur.execute(f"ALTER TABLE settings ADD COLUMN {col} TEXT")
         except sqlite3.OperationalError:
             pass
+
+    # One-time migration: this feature used to be called "vouch" — carry over
+    # any settings saved under the old column names so servers that already
+    # configured it don't lose their setup.
+    try:
+        cur.execute(
+            """
+            UPDATE settings
+            SET autoreact_channel_id = vouch_channel_id,
+                autoreact_reaction_emoji = vouch_reaction_emoji,
+                autoreact_super_reaction = vouch_super_reaction
+            WHERE vouch_channel_id IS NOT NULL AND autoreact_channel_id IS NULL
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
 
     cur.execute(
         """
@@ -189,7 +205,7 @@ def init_db() -> None:
 def upsert_settings(guild_id: int, **kwargs) -> None:
     allowed = set(SETTINGS_COLUMNS) | {
         "welcome_channel_id", "boost_channel_id",
-        "vouch_channel_id", "vouch_reaction_emoji", "vouch_super_reaction"
+        "autoreact_channel_id", "autoreact_reaction_emoji", "autoreact_super_reaction"
     }
     updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not updates:
@@ -309,6 +325,34 @@ def parse_button(button: str | None):
 
 def parse_emoji(value: str | None):
     return value.strip() if value else None
+
+
+CHANNEL_MENTION_RE = re.compile(r'<#(\d+)>')
+
+
+def parse_channel_list(guild: discord.Guild, raw: str) -> tuple[list[discord.TextChannel], list[str]]:
+    """Parses a space/comma-separated list of channel mentions or raw IDs.
+    Returns (found_channels, invalid_tokens)."""
+    tokens = re.split(r'[\s,]+', raw.strip())
+    found: list[discord.TextChannel] = []
+    invalid: list[str] = []
+    seen: set[int] = set()
+    for tok in tokens:
+        if not tok:
+            continue
+        m = CHANNEL_MENTION_RE.match(tok)
+        cid = m.group(1) if m else (tok if tok.isdigit() else None)
+        if not cid:
+            invalid.append(tok)
+            continue
+        channel = guild.get_channel(int(cid))
+        if not channel or not isinstance(channel, discord.TextChannel):
+            invalid.append(tok)
+            continue
+        if channel.id not in seen:
+            seen.add(channel.id)
+            found.append(channel)
+    return found, invalid
 
 
 def check_trigger(content_lower: str, trigger: str, match_type: str) -> bool:
@@ -906,10 +950,11 @@ async def on_message(message: discord.Message):
     if not message.guild:
         return
 
-    # Vouch auto-react
+    # Autoreact
     settings = get_settings(message.guild.id)
-    if settings and settings["vouch_channel_id"]:
-        if message.channel.id == int(settings["vouch_channel_id"]):
+    if settings and settings["autoreact_channel_id"]:
+        autoreact_channel_ids = {int(c) for c in settings["autoreact_channel_id"].split(",") if c.strip()}
+        if message.channel.id in autoreact_channel_ids:
             conn = get_db()
             cur = conn.cursor()
             cur.execute("SELECT last_message_id FROM sticky_messages WHERE guild_id = ? AND channel_id = ?", (message.guild.id, message.channel.id))
@@ -919,8 +964,8 @@ async def on_message(message: discord.Message):
             is_sticky = sticky_row and sticky_row["last_message_id"] == message.id
             
             if not is_sticky:
-                reaction_emojis = settings["vouch_reaction_emoji"]
-                super_reaction = settings["vouch_super_reaction"] == "1"
+                reaction_emojis = settings["autoreact_reaction_emoji"]
+                super_reaction = settings["autoreact_super_reaction"] == "1"
                 if reaction_emojis:
                     emoji_list = [e.strip() for e in reaction_emojis.split(",") if e.strip()]
                     for emoji in emoji_list:
@@ -1675,26 +1720,119 @@ async def verify_responses(interaction: discord.Interaction, success_message: st
 
 
 # ———————————————––
-# Commands — Vouch
+# Commands — Autoreact
 # ———————————————––
 
-@bot.tree.command(name="vouch_setup", description="Set up auto-reaction in a vouch channel")
+@bot.tree.command(name="autoreact_setup", description="Set up auto-reaction in one or more channels")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(channel="Vouch channel", emojis="Emojis to react with (space-separated)", super_reaction="Enable super reaction mode")
-async def vouch_setup(interaction: discord.Interaction, channel: discord.TextChannel, emojis: str, super_reaction: bool = False):
+@app_commands.describe(channels="Channel(s) to auto-react in, space-separated (e.g. #vouches #reviews)", emojis="Emojis to react with (space-separated)", super_reaction="Enable super reaction mode")
+async def autoreact_setup(interaction: discord.Interaction, channels: str, emojis: str, super_reaction: bool = False):
     guild = guild_only(interaction)
+    found, invalid = parse_channel_list(guild, channels)
+    if not found:
+        await interaction.response.send_message("❌ I couldn't find any valid channels in that list. Mention them like #vouches #reviews.", ephemeral=True)
+        return
+
     emoji_list = emojis.split()
-    upsert_settings(guild.id, vouch_channel_id=str(channel.id), vouch_reaction_emoji=",".join(emoji_list), vouch_super_reaction="1" if super_reaction else "0")
+    channel_ids = [str(c.id) for c in found]
+    upsert_settings(guild.id, autoreact_channel_id=",".join(channel_ids), autoreact_reaction_emoji=",".join(emoji_list), autoreact_super_reaction="1" if super_reaction else "0")
+
+    channel_display = " ".join(c.mention for c in found)
     emoji_display = " ".join(emoji_list)
-    await interaction.response.send_message(f"{CHECK} Vouch channel set to {channel.mention}\n**Emojis:** {emoji_display}\n**Super reaction:** {'Enabled' if super_reaction else 'Disabled'}", ephemeral=True)
+    msg = f"{CHECK} Autoreact channels set to {channel_display}\n**Emojis:** {emoji_display}\n**Super reaction:** {'Enabled' if super_reaction else 'Disabled'}"
+    if invalid:
+        msg += f"\n⚠️ Skipped (not found): {', '.join(invalid)}"
+    await interaction.response.send_message(msg, ephemeral=True)
 
 
-@bot.tree.command(name="vouch_clear", description="Disable vouch auto-reactions")
+@bot.tree.command(name="autoreact_channel_add", description="Add channel(s) to autoreact without changing emoji settings")
 @app_commands.checks.has_permissions(manage_guild=True)
-async def vouch_clear(interaction: discord.Interaction):
+@app_commands.describe(channels="Channel(s) to add, space-separated")
+async def autoreact_channel_add(interaction: discord.Interaction, channels: str):
     guild = guild_only(interaction)
-    upsert_settings(guild.id, vouch_channel_id="", vouch_reaction_emoji="", vouch_super_reaction="0")
-    await interaction.response.send_message(f"{CHECK} Vouch auto-reaction disabled.", ephemeral=True)
+    settings = get_settings(guild.id)
+    if not settings or not settings["autoreact_channel_id"]:
+        await interaction.response.send_message("Run `/autoreact_setup` first.", ephemeral=True)
+        return
+
+    found, invalid = parse_channel_list(guild, channels)
+    if not found:
+        await interaction.response.send_message("❌ I couldn't find any valid channels in that list.", ephemeral=True)
+        return
+
+    existing_ids = [c for c in settings["autoreact_channel_id"].split(",") if c.strip()]
+    added = []
+    for c in found:
+        if str(c.id) not in existing_ids:
+            existing_ids.append(str(c.id))
+            added.append(c)
+
+    upsert_settings(guild.id, autoreact_channel_id=",".join(existing_ids))
+    guild_channels = [guild.get_channel(int(cid)) for cid in existing_ids]
+    display = " ".join(c.mention for c in guild_channels if c)
+
+    msg = f"{CHECK} Autoreact channels are now: {display}"
+    if not added:
+        msg = "Those channels are already in the autoreact list.\n" + msg
+    if invalid:
+        msg += f"\n⚠️ Skipped (not found): {', '.join(invalid)}"
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
+@bot.tree.command(name="autoreact_channel_remove", description="Remove channel(s) from autoreact")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(channels="Channel(s) to remove, space-separated")
+async def autoreact_channel_remove(interaction: discord.Interaction, channels: str):
+    guild = guild_only(interaction)
+    settings = get_settings(guild.id)
+    if not settings or not settings["autoreact_channel_id"]:
+        await interaction.response.send_message("No autoreact channels are set up.", ephemeral=True)
+        return
+
+    existing_ids = [c for c in settings["autoreact_channel_id"].split(",") if c.strip()]
+    found, invalid = parse_channel_list(guild, channels)
+    to_remove_ids = {str(c.id) for c in found}
+    remaining_ids = [cid for cid in existing_ids if cid not in to_remove_ids]
+
+    if len(remaining_ids) == len(existing_ids):
+        await interaction.response.send_message("None of those channels were in the autoreact list.", ephemeral=True)
+        return
+
+    upsert_settings(guild.id, autoreact_channel_id=",".join(remaining_ids))
+
+    if remaining_ids:
+        guild_channels = [guild.get_channel(int(cid)) for cid in remaining_ids]
+        display = " ".join(c.mention for c in guild_channels if c)
+        msg = f"{CHECK} Removed. Autoreact channels are now: {display}"
+    else:
+        msg = f"{CHECK} Removed. No autoreact channels remain — auto-reaction is now off."
+    if invalid:
+        msg += f"\n⚠️ Skipped (not found): {', '.join(invalid)}"
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
+@bot.tree.command(name="autoreact_list", description="See which channels have autoreact enabled")
+async def autoreact_list(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    settings = get_settings(guild.id)
+    if not settings or not settings["autoreact_channel_id"]:
+        await interaction.response.send_message("No autoreact channels are set up. Use `/autoreact_setup`.", ephemeral=True)
+        return
+
+    ids = [c for c in settings["autoreact_channel_id"].split(",") if c.strip()]
+    channels = [guild.get_channel(int(cid)) for cid in ids]
+    display = " ".join(c.mention for c in channels if c)
+    emoji_display = " ".join(settings["autoreact_reaction_emoji"].split(",")) if settings["autoreact_reaction_emoji"] else "*(none set)*"
+    super_status = "Enabled" if settings["autoreact_super_reaction"] == "1" else "Disabled"
+    await interaction.response.send_message(f"**Autoreact channels:** {display}\n**Emojis:** {emoji_display}\n**Super reaction:** {super_status}", ephemeral=True)
+
+
+@bot.tree.command(name="autoreact_clear", description="Disable autoreact")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def autoreact_clear(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, autoreact_channel_id="", autoreact_reaction_emoji="", autoreact_super_reaction="0")
+    await interaction.response.send_message(f"{CHECK} Autoreact disabled.", ephemeral=True)
 
 
 # ———————————————––
