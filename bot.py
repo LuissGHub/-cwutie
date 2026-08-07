@@ -58,6 +58,7 @@ SETTINGS_COLUMNS = [
     "verify_title", "verify_description", "verify_color", "verify_image_url", "verify_thumbnail_url",
     "verify_success_message", "verify_already_message",
     "boost_channel_id", "boost_text", "boost_outside_text", "boost_title", "boost_color", "boost_image_url", "boost_banner2_url", "boost_thumbnail_url", "boost_use_avatar",
+    "boost_reaction_emoji", "boost_super_reaction",
     "autoreact_channel_id", "autoreact_reaction_emoji", "autoreact_super_reaction",
     "ticket_category_id", "ticket_name_prefix",
 ]
@@ -935,7 +936,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             thumbnail=None if use_av else thumb,
             user_avatar_url=after.display_avatar.url if use_av else None
         )
-        await channel.send(content=outside_text, embed=embed)
+        boost_msg = await channel.send(content=outside_text, embed=embed)
 
         if settings["boost_banner2_url"]:
             embed2 = build_embed(
@@ -945,6 +946,24 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                 image=settings["boost_banner2_url"],
             )
             await channel.send(embed=embed2)
+
+        # Auto-react to the bot's own boost message, mirroring the channel
+        # autoreact behavior (same settle-delay, same super-reaction flow).
+        reaction_emojis = settings["boost_reaction_emoji"]
+        if reaction_emojis:
+            emoji_list = [e.strip() for e in reaction_emojis.split(",") if e.strip()]
+            super_reaction = settings["boost_super_reaction"] == "1"
+            await asyncio.sleep(AUTOREACT_DELAY_SECONDS)
+            for emoji in emoji_list:
+                try:
+                    await boost_msg.add_reaction(emoji)
+                    if super_reaction:
+                        await asyncio.sleep(0.1)
+                        await boost_msg.remove_reaction(emoji, bot.user)
+                        await asyncio.sleep(0.1)
+                        await boost_msg.add_reaction(emoji)
+                except Exception as e:
+                    print(f"[DEBUG] Failed to auto-react to boost message with {emoji}: {e}")
 
 
 @bot.event
@@ -1655,6 +1674,28 @@ async def test_boost(interaction: discord.Interaction):
     if settings["boost_banner2_url"]:
         embed2 = build_embed(title=None, description=None, theme=settings["boost_color"] or "pink", image=settings["boost_banner2_url"])
         await interaction.followup.send(embed=embed2, ephemeral=True)
+
+
+@bot.tree.command(name="boost_reaction_setup", description="Set emojis the bot auto-reacts with on its own boost message")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(emojis="Emojis to react with (space-separated)", super_reaction="Enable super reaction mode")
+async def boost_reaction_setup(interaction: discord.Interaction, emojis: str, super_reaction: bool = False):
+    guild = guild_only(interaction)
+    emoji_list = emojis.split()
+    upsert_settings(guild.id, boost_reaction_emoji=",".join(emoji_list), boost_super_reaction="1" if super_reaction else "0")
+    emoji_display = " ".join(emoji_list)
+    await interaction.response.send_message(
+        f"{CHECK} The boost message will now auto-react with: {emoji_display}\n**Super reaction:** {'Enabled' if super_reaction else 'Disabled'}",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="boost_reaction_clear", description="Turn off auto-reacting on the boost message")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def boost_reaction_clear(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, boost_reaction_emoji="", boost_super_reaction="0")
+    await interaction.response.send_message(f"{CHECK} Boost auto-react disabled.", ephemeral=True)
 
 
 # ———————————————––
