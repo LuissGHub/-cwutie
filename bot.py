@@ -2367,15 +2367,6 @@ bot.tree.add_command(role_group)
 # Commands — Showcase
 # ———————————————––
 
-@bot.tree.command(name="showcase_channel", description="Set which channel showcase posts go to")
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(channel="Channel for showcase posts")
-async def showcase_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    guild = guild_only(interaction)
-    upsert_settings(guild.id, showcase_channel_id=channel.id)
-    await interaction.response.send_message(f"{CHECK} Showcase posts will go to {channel.mention}!", ephemeral=True)
-
-
 @bot.tree.command(name="showcase_setup", description="Set the fixed showcase template (text + the 2nd/3rd banner images)")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def showcase_setup(interaction: discord.Interaction):
@@ -2413,22 +2404,16 @@ async def showcase_test(interaction: discord.Interaction, image: discord.Attachm
     await interaction.followup.send(embeds=embeds, file=file, ephemeral=True)
 
 
-@bot.tree.command(name="showcase", description="Post a new showcase with your saved template")
+@bot.tree.command(name="showcase", description="Post a new showcase (in this channel/thread) with your saved template")
 @app_commands.describe(image="The commission photo to showcase")
 async def showcase_command(interaction: discord.Interaction, image: discord.Attachment):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
-    if not settings or not settings["showcase_channel_id"]:
-        await interaction.response.send_message("Run `/showcase_channel` first.", ephemeral=True)
-        return
-    if not settings["showcase_text"]:
+    if not settings or not settings["showcase_text"]:
         await interaction.response.send_message("Run `/showcase_setup` first to set the fixed template text.", ephemeral=True)
         return
 
-    channel = guild.get_channel(int(settings["showcase_channel_id"]))
-    if not channel:
-        await interaction.response.send_message("⚠️ Showcase channel not found — run `/showcase_channel` again.", ephemeral=True)
-        return
+    channel = interaction.channel
 
     if not image.content_type or not image.content_type.startswith("image/"):
         await interaction.response.send_message("❌ Please attach an image file.", ephemeral=True)
