@@ -61,6 +61,7 @@ SETTINGS_COLUMNS = [
     "boost_reaction_emoji", "boost_super_reaction",
     "autoreact_channel_id", "autoreact_reaction_emoji", "autoreact_super_reaction",
     "ticket_category_id", "ticket_name_prefix",
+    "showcase_channel_id", "showcase_text", "showcase_theme", "showcase_image2_url", "showcase_image3_url",
 ]
 
 # ———————————————––
@@ -649,6 +650,53 @@ class RedeemTemplateModal(discord.ui.Modal, title="Redeem Message Template"):
         if "{code}" not in template_val:
             msg += "\n⚠️ Heads up — I didn't see `{code}` anywhere in that template, so any code you pass into `/redeem` won't actually show up."
         await interaction.response.send_message(msg, ephemeral=True)
+
+
+class ShowcaseSetupModal(discord.ui.Modal, title="Showcase Template"):
+    showcase_text = discord.ui.TextInput(
+        label="Fixed text (top embed description)",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=4000,
+        placeholder="The decorative header block — reused every showcase post",
+    )
+    theme = discord.ui.TextInput(label="Color — theme name or hex", required=False, max_length=20, placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
+    image2_url = discord.ui.TextInput(label="2nd embed image URL (fixed)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.gif")
+    image3_url = discord.ui.TextInput(label="3rd embed image URL (fixed, optional)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/xyz456.gif")
+
+    def __init__(self, prefill: dict | None = None):
+        super().__init__()
+        if prefill:
+            if prefill.get("showcase_text"):
+                self.showcase_text.default = prefill["showcase_text"]
+            if prefill.get("showcase_theme"):
+                self.theme.default = prefill["showcase_theme"]
+            if prefill.get("showcase_image2_url"):
+                self.image2_url.default = prefill["showcase_image2_url"]
+            if prefill.get("showcase_image3_url"):
+                self.image3_url.default = prefill["showcase_image3_url"]
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild = guild_only(interaction)
+        kwargs = {
+            "showcase_text": str(self.showcase_text).replace("\\n", "\n"),
+            "showcase_theme": str(self.theme).strip() or "pink",
+            "showcase_image2_url": str(self.image2_url).strip(),
+            "showcase_image3_url": str(self.image3_url).strip(),
+        }
+        upsert_settings(guild.id, **kwargs)
+
+        preview_embeds = [build_embed(title=None, description=kwargs["showcase_text"], theme=kwargs["showcase_theme"], image=None)]
+        if kwargs["showcase_image2_url"]:
+            preview_embeds.append(build_embed(title=None, description=None, theme=kwargs["showcase_theme"], image=kwargs["showcase_image2_url"]))
+        if kwargs["showcase_image3_url"]:
+            preview_embeds.append(build_embed(title=None, description=None, theme=kwargs["showcase_theme"], image=kwargs["showcase_image3_url"]))
+
+        await interaction.response.send_message(
+            f"{CHECK} Showcase template saved! When you run `/showcase`, this text/theme goes in the 1st embed alongside your photo, followed by the fixed image(s) below.",
+            embeds=preview_embeds,
+            ephemeral=True,
+        )
 
 
 # ———————————————––
@@ -2313,6 +2361,91 @@ async def role_remove(interaction: discord.Interaction, user: discord.Member, ro
 
 
 bot.tree.add_command(role_group)
+
+
+# ———————————————––
+# Commands — Showcase
+# ———————————————––
+
+@bot.tree.command(name="showcase_channel", description="Set which channel showcase posts go to")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(channel="Channel for showcase posts")
+async def showcase_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, showcase_channel_id=channel.id)
+    await interaction.response.send_message(f"{CHECK} Showcase posts will go to {channel.mention}!", ephemeral=True)
+
+
+@bot.tree.command(name="showcase_setup", description="Set the fixed showcase template (text + the 2nd/3rd banner images)")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def showcase_setup(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    settings = get_settings(guild.id)
+    prefill = None
+    if settings:
+        prefill = {
+            "showcase_text": settings["showcase_text"],
+            "showcase_theme": settings["showcase_theme"],
+            "showcase_image2_url": settings["showcase_image2_url"],
+            "showcase_image3_url": settings["showcase_image3_url"],
+        }
+    await interaction.response.send_modal(ShowcaseSetupModal(prefill=prefill))
+
+
+@bot.tree.command(name="showcase_test", description="Preview the showcase post without sending it to the channel")
+@app_commands.describe(image="The commission photo to preview with")
+async def showcase_test(interaction: discord.Interaction, image: discord.Attachment):
+    guild = guild_only(interaction)
+    settings = get_settings(guild.id)
+    if not settings or not settings["showcase_text"]:
+        await interaction.response.send_message("Run `/showcase_setup` first.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    file = await image.to_file()
+    theme = settings["showcase_theme"] or "pink"
+    embeds = [build_embed(title=None, description=settings["showcase_text"], theme=theme, image=f"attachment://{file.filename}")]
+    if settings["showcase_image2_url"]:
+        embeds.append(build_embed(title=None, description=None, theme=theme, image=settings["showcase_image2_url"]))
+    if settings["showcase_image3_url"]:
+        embeds.append(build_embed(title=None, description=None, theme=theme, image=settings["showcase_image3_url"]))
+
+    await interaction.followup.send(embeds=embeds, file=file, ephemeral=True)
+
+
+@bot.tree.command(name="showcase", description="Post a new showcase with your saved template")
+@app_commands.describe(image="The commission photo to showcase")
+async def showcase_command(interaction: discord.Interaction, image: discord.Attachment):
+    guild = guild_only(interaction)
+    settings = get_settings(guild.id)
+    if not settings or not settings["showcase_channel_id"]:
+        await interaction.response.send_message("Run `/showcase_channel` first.", ephemeral=True)
+        return
+    if not settings["showcase_text"]:
+        await interaction.response.send_message("Run `/showcase_setup` first to set the fixed template text.", ephemeral=True)
+        return
+
+    channel = guild.get_channel(int(settings["showcase_channel_id"]))
+    if not channel:
+        await interaction.response.send_message("⚠️ Showcase channel not found — run `/showcase_channel` again.", ephemeral=True)
+        return
+
+    if not image.content_type or not image.content_type.startswith("image/"):
+        await interaction.response.send_message("❌ Please attach an image file.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    file = await image.to_file()
+    theme = settings["showcase_theme"] or "pink"
+
+    embeds = [build_embed(title=None, description=settings["showcase_text"], theme=theme, image=f"attachment://{file.filename}")]
+    if settings["showcase_image2_url"]:
+        embeds.append(build_embed(title=None, description=None, theme=theme, image=settings["showcase_image2_url"]))
+    if settings["showcase_image3_url"]:
+        embeds.append(build_embed(title=None, description=None, theme=theme, image=settings["showcase_image3_url"]))
+
+    await channel.send(embeds=embeds, file=file)
+    await interaction.followup.send(f"{CHECK} Showcase posted to {channel.mention}!", ephemeral=True)
 
 
 # ———————————————––
