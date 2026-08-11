@@ -2548,6 +2548,43 @@ async def sticker_steal(interaction: discord.Interaction, sticker_id: str, name:
 bot.tree.add_command(sticker_group)
 
 
+# Right-click a message with a sticker on it → Apps → "Steal Sticker".
+# Grabs the sticker straight off the message, no ID typing required.
+# This exists alongside /sticker steal (which still needs a raw sticker ID
+# for cases where you don't have the original message handy).
+@bot.tree.context_menu(name="Steal Sticker")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def sticker_steal_context(interaction: discord.Interaction, message: discord.Message):
+    guild = guild_only(interaction)
+
+    if not message.stickers:
+        await interaction.response.send_message("❌ That message doesn't have a sticker on it.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    sticker_item = message.stickers[0]
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(sticker_item.url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    await interaction.followup.send("❌ Couldn't download the sticker.", ephemeral=True)
+                    return
+                sticker_data = await resp.read()
+
+        created_sticker = await guild.create_sticker(
+            name=sticker_item.name,
+            description="Stolen sticker",
+            emoji="📌",
+            file=discord.File(io.BytesIO(sticker_data), filename=f"{sticker_item.name}.png")
+        )
+        await interaction.followup.send(f"{CHECK} Sticker stolen! **{created_sticker.name}**", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send("❌ I don't have permission to create stickers.", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {str(e)[:100]}", ephemeral=True)
+
+
 # ———————————————––
 # Run
 # ———————————————––
