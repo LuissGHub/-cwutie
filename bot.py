@@ -73,6 +73,7 @@ IMAGE_RESPONDER_COLUMNS = [
     ("color", "TEXT DEFAULT 'pink'"),
     ("thumbnail_url", "TEXT"),
     ("footer", "TEXT"),
+    ("footer_icon", "TEXT"),
 ]
 
 # ———————————————––
@@ -217,14 +218,15 @@ def init_db() -> None:
             color TEXT DEFAULT 'pink',
             thumbnail_url TEXT,
             footer TEXT,
+            footer_icon TEXT,
             UNIQUE(guild_id, trigger)
         )
         """
     )
 
-    # Carries "color" / "thumbnail_url" / "footer" onto any image_responders
-    # table that was created before those columns existed (CREATE TABLE IF
-    # NOT EXISTS above only applies to brand-new tables).
+    # Carries "color" / "thumbnail_url" / "footer" / "footer_icon" onto any
+    # image_responders table that was created before those columns existed
+    # (CREATE TABLE IF NOT EXISTS above only applies to brand-new tables).
     for col, coldef in IMAGE_RESPONDER_COLUMNS:
         try:
             cur.execute(f"ALTER TABLE image_responders ADD COLUMN {col} {coldef}")
@@ -304,6 +306,7 @@ def build_embed(
     image: str | None = None,
     thumbnail: str | None = None,
     footer: str | None = None,
+    footer_icon: str | None = None,
     user_avatar_url: str | None = None,
 ) -> discord.Embed:
     safe_desc = description
@@ -319,7 +322,7 @@ def build_embed(
     elif thumbnail:
         embed.set_thumbnail(url=thumbnail)
     if footer:
-        embed.set_footer(text=footer)
+        embed.set_footer(text=footer, icon_url=footer_icon or None)
     
     return embed
 
@@ -372,6 +375,26 @@ def parse_button(button: str | None):
 
 def parse_emoji(value: str | None):
     return value.strip() if value else None
+
+
+CUSTOM_EMOJI_FULL_RE = re.compile(r'^<(a)?:\w+:(\d+)>$')
+
+
+def resolve_icon_url(value: str | None) -> str | None:
+    """Accepts either a direct image URL or a custom Discord emoji
+    (e.g. <:sparkle:123456789012345678> or <a:sparkle:123...> for animated)
+    and returns a URL usable as an embed footer/thumbnail icon. Unicode
+    emoji (which have no CDN image) are returned as-is and will just fail
+    to load as an icon — those should go in the plain footer text instead."""
+    if not value:
+        return None
+    value = value.strip()
+    m = CUSTOM_EMOJI_FULL_RE.match(value)
+    if m:
+        animated, emoji_id = m.groups()
+        ext = "gif" if animated else "png"
+        return f"https://cdn.discordapp.com/emojis/{emoji_id}.{ext}"
+    return value
 
 
 CHANNEL_MENTION_RE = re.compile(r'<#(\d+)>')
@@ -1199,7 +1222,7 @@ async def on_message(message: discord.Message):
     # Image responders
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT trigger, image_url, caption, match_type, color, thumbnail_url, footer FROM image_responders WHERE guild_id = ?", (message.guild.id,))
+    cur.execute("SELECT trigger, image_url, caption, match_type, color, thumbnail_url, footer, footer_icon FROM image_responders WHERE guild_id = ?", (message.guild.id,))
     all_imgs = cur.fetchall()
     conn.close()
 
@@ -1212,6 +1235,7 @@ async def on_message(message: discord.Message):
                 image=img["image_url"],
                 thumbnail=img["thumbnail_url"] or None,
                 footer=img["footer"] or None,
+                footer_icon=img["footer_icon"] or None,
             )
             await message.channel.send(embed=embed)
             break
@@ -2280,21 +2304,23 @@ async def autoresponder_list(interaction: discord.Interaction):
     color="Embed color — theme name or hex (e.g. pink / blue / #f7cfe3)",
     thumbnail_url="Small image shown on the side/corner of the embed",
     footer="Small text shown at the bottom of the embed",
+    footer_icon="Small icon next to the footer text — paste a custom emoji (e.g. <:sparkle:123...>) or an image URL",
 )
 @app_commands.choices(match_type=[app_commands.Choice(name="exact", value="exact"), app_commands.Choice(name="anywhere", value="anywhere")])
-async def imageresponder_add(interaction: discord.Interaction, trigger: str, image_url: str, caption: str | None = None, match_type: str = "exact", color: str = "pink", thumbnail_url: str | None = None, footer: str | None = None):
+async def imageresponder_add(interaction: discord.Interaction, trigger: str, image_url: str, caption: str | None = None, match_type: str = "exact", color: str = "pink", thumbnail_url: str | None = None, footer: str | None = None, footer_icon: str | None = None):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip()
+    footer_icon_url = resolve_icon_url(footer_icon)
     conn = get_db()
     cur = conn.cursor()
     
     try:
         cur.execute(
-            "INSERT INTO image_responders (guild_id, trigger, image_url, caption, match_type, color, thumbnail_url, footer) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (guild.id, trigger, image_url, caption, match_type, color or "pink", thumbnail_url, footer),
+            "INSERT INTO image_responders (guild_id, trigger, image_url, caption, match_type, color, thumbnail_url, footer, footer_icon) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (guild.id, trigger, image_url, caption, match_type, color or "pink", thumbnail_url, footer, footer_icon_url),
         )
         conn.commit()
-        preview = build_embed(title=None, description=caption or None, theme=color or "pink", image=image_url, thumbnail=thumbnail_url, footer=footer or None)
+        preview = build_embed(title=None, description=caption or None, theme=color or "pink", image=image_url, thumbnail=thumbnail_url, footer=footer or None, footer_icon=footer_icon_url)
         await interaction.response.send_message(f"{CHECK} Image responder `{trigger}` created! (match: {match_type})", embed=preview, ephemeral=True)
     except sqlite3.IntegrityError:
         await interaction.response.send_message(f"❌ Trigger `{trigger}` already exists.", ephemeral=True)
@@ -2312,9 +2338,10 @@ async def imageresponder_add(interaction: discord.Interaction, trigger: str, ima
     color="New embed color — theme name or hex ('none' clears back to pink)",
     thumbnail_url="New small side image URL ('none' to remove)",
     footer="New footer text ('none' to remove)",
+    footer_icon="New footer icon — custom emoji or image URL ('none' to remove)",
 )
 @app_commands.choices(match_type=[app_commands.Choice(name="exact", value="exact"), app_commands.Choice(name="anywhere", value="anywhere")])
-async def imageresponder_edit(interaction: discord.Interaction, trigger: str, image_url: str | None = None, caption: str | None = None, match_type: str | None = None, color: str | None = None, thumbnail_url: str | None = None, footer: str | None = None):
+async def imageresponder_edit(interaction: discord.Interaction, trigger: str, image_url: str | None = None, caption: str | None = None, match_type: str | None = None, color: str | None = None, thumbnail_url: str | None = None, footer: str | None = None, footer_icon: str | None = None):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip()
     conn = get_db()
@@ -2339,14 +2366,18 @@ async def imageresponder_edit(interaction: discord.Interaction, trigger: str, im
         final_footer = row["footer"]
     else:
         final_footer = None if footer.lower() == "none" else footer
+    if footer_icon is None:
+        final_footer_icon = row["footer_icon"]
+    else:
+        final_footer_icon = None if footer_icon.lower() == "none" else resolve_icon_url(footer_icon)
     cur.execute(
-        "UPDATE image_responders SET image_url = ?, caption = ?, match_type = ?, color = ?, thumbnail_url = ?, footer = ? WHERE guild_id = ? AND trigger = ?",
-        (final_image, final_caption, final_match, final_color, final_thumbnail, final_footer, guild.id, trigger),
+        "UPDATE image_responders SET image_url = ?, caption = ?, match_type = ?, color = ?, thumbnail_url = ?, footer = ?, footer_icon = ? WHERE guild_id = ? AND trigger = ?",
+        (final_image, final_caption, final_match, final_color, final_thumbnail, final_footer, final_footer_icon, guild.id, trigger),
     )
     conn.commit()
     conn.close()
     
-    preview = build_embed(title=None, description=final_caption or None, theme=final_color, image=final_image, thumbnail=final_thumbnail, footer=final_footer)
+    preview = build_embed(title=None, description=final_caption or None, theme=final_color, image=final_image, thumbnail=final_thumbnail, footer=final_footer, footer_icon=final_footer_icon)
     await interaction.response.send_message(f"{CHECK} Image responder `{trigger}` updated! (match: {final_match})", embed=preview, ephemeral=True)
 
 
