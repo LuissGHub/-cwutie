@@ -60,7 +60,7 @@ SETTINGS_COLUMNS = [
     "boost_channel_id", "boost_text", "boost_outside_text", "boost_title", "boost_color", "boost_image_url", "boost_banner2_url", "boost_thumbnail_url", "boost_use_avatar",
     "boost_reaction_emoji", "boost_super_reaction",
     "autoreact_channel_id", "autoreact_reaction_emoji", "autoreact_super_reaction",
-    "rolemention_role_id", "rolemention_emojis",
+    "usermention_user_id", "usermention_emojis",
     "botmention_message",
     "ticket_category_id", "ticket_name_prefix",
     "showcase_channel_id", "showcase_text", "showcase_theme", "showcase_image2_url", "showcase_image3_url",
@@ -72,6 +72,7 @@ SETTINGS_COLUMNS = [
 IMAGE_RESPONDER_COLUMNS = [
     ("color", "TEXT DEFAULT 'pink'"),
     ("thumbnail_url", "TEXT"),
+    ("footer", "TEXT"),
 ]
 
 # ———————————————––
@@ -124,6 +125,21 @@ def init_db() -> None:
                 autoreact_reaction_emoji = vouch_reaction_emoji,
                 autoreact_super_reaction = vouch_super_reaction
             WHERE vouch_channel_id IS NOT NULL AND autoreact_channel_id IS NULL
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    # One-time migration: this feature used to watch role mentions instead of
+    # specific user mentions — carry over any settings saved under the old
+    # column names so servers that already configured it don't lose their setup.
+    try:
+        cur.execute(
+            """
+            UPDATE settings
+            SET usermention_user_id = rolemention_role_id,
+                usermention_emojis = rolemention_emojis
+            WHERE rolemention_role_id IS NOT NULL AND usermention_user_id IS NULL
             """
         )
     except sqlite3.OperationalError:
@@ -200,14 +216,15 @@ def init_db() -> None:
             match_type TEXT DEFAULT 'exact',
             color TEXT DEFAULT 'pink',
             thumbnail_url TEXT,
+            footer TEXT,
             UNIQUE(guild_id, trigger)
         )
         """
     )
 
-    # Carries "color" / "thumbnail_url" onto any image_responders table that
-    # was created before those columns existed (CREATE TABLE IF NOT EXISTS
-    # above only applies to brand-new tables).
+    # Carries "color" / "thumbnail_url" / "footer" onto any image_responders
+    # table that was created before those columns existed (CREATE TABLE IF
+    # NOT EXISTS above only applies to brand-new tables).
     for col, coldef in IMAGE_RESPONDER_COLUMNS:
         try:
             cur.execute(f"ALTER TABLE image_responders ADD COLUMN {col} {coldef}")
@@ -410,6 +427,36 @@ def parse_role_list(guild: discord.Guild, raw: str) -> tuple[list[discord.Role],
         if role.id not in seen:
             seen.add(role.id)
             found.append(role)
+    return found, invalid
+
+
+USER_MENTION_RE = re.compile(r'<@!?(\d+)>')
+
+
+def parse_user_list(guild: discord.Guild, raw: str) -> tuple[list[discord.Member], list[str]]:
+    """Parses a space/comma-separated list of user mentions or raw IDs.
+    Returns (found_members, invalid_tokens). Looks members up from cache
+    first, falling back to nothing found (caller should just store the IDs
+    that don't resolve to a cached member — they still work for matching)."""
+    tokens = re.split(r'[\s,]+', raw.strip())
+    found: list[discord.Member] = []
+    invalid: list[str] = []
+    seen: set[int] = set()
+    for tok in tokens:
+        if not tok:
+            continue
+        m = USER_MENTION_RE.match(tok)
+        uid = m.group(1) if m else (tok if tok.isdigit() else None)
+        if not uid:
+            invalid.append(tok)
+            continue
+        member = guild.get_member(int(uid))
+        if not member:
+            invalid.append(tok)
+            continue
+        if member.id not in seen:
+            seen.add(member.id)
+            found.append(member)
     return found, invalid
 
 
@@ -1106,12 +1153,12 @@ async def on_message(message: discord.Message):
                         except Exception as e:
                             print(f"[DEBUG] Failed to auto-react with {emoji}: {e}")
 
-    # Role mention reactions — someone @'d a configured role, react with emojis
-    if settings and settings["rolemention_role_id"] and message.role_mentions:
-        watched_role_ids = {int(r) for r in settings["rolemention_role_id"].split(",") if r.strip()}
-        mentioned_role_ids = {r.id for r in message.role_mentions}
-        if watched_role_ids & mentioned_role_ids:
-            reaction_emojis = settings["rolemention_emojis"]
+    # User mention reactions — someone @'d a specific configured user, react with emojis
+    if settings and settings["usermention_user_id"] and message.mentions:
+        watched_user_ids = {int(u) for u in settings["usermention_user_id"].split(",") if u.strip()}
+        mentioned_user_ids = {u.id for u in message.mentions}
+        if watched_user_ids & mentioned_user_ids:
+            reaction_emojis = settings["usermention_emojis"]
             if reaction_emojis:
                 emoji_list = [e.strip() for e in reaction_emojis.split(",") if e.strip()]
                 await asyncio.sleep(AUTOREACT_DELAY_SECONDS)
@@ -1119,7 +1166,7 @@ async def on_message(message: discord.Message):
                     try:
                         await message.add_reaction(emoji)
                     except Exception as e:
-                        print(f"[DEBUG] Failed to auto-react to role mention with {emoji}: {e}")
+                        print(f"[DEBUG] Failed to auto-react to user mention with {emoji}: {e}")
 
     # Bot mention reply — someone @'d the bot directly, send a text reply
     if bot.user in message.mentions:
@@ -1152,7 +1199,7 @@ async def on_message(message: discord.Message):
     # Image responders
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT trigger, image_url, caption, match_type, color, thumbnail_url FROM image_responders WHERE guild_id = ?", (message.guild.id,))
+    cur.execute("SELECT trigger, image_url, caption, match_type, color, thumbnail_url, footer FROM image_responders WHERE guild_id = ?", (message.guild.id,))
     all_imgs = cur.fetchall()
     conn.close()
 
@@ -1164,6 +1211,7 @@ async def on_message(message: discord.Message):
                 theme=img["color"] or "pink",
                 image=img["image_url"],
                 thumbnail=img["thumbnail_url"] or None,
+                footer=img["footer"] or None,
             )
             await message.channel.send(embed=embed)
             break
@@ -2019,52 +2067,51 @@ async def autoreact_clear(interaction: discord.Interaction):
 
 
 # ———————————————––
-# Commands — Role Mention Reactions & Bot Mention Reply
+# Commands — User Mention Reactions & Bot Mention Reply
 # ———————————————––
 
-@bot.tree.command(name="rolemention_setup", description="React with emojis whenever someone @'s a role")
+@bot.tree.command(name="usermention_setup", description="React with emojis whenever someone @'s a specific user")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(roles="Role(s) to watch for, space-separated (e.g. @staff @mods)", emojis="Emojis to react with (space-separated)")
-async def rolemention_setup(interaction: discord.Interaction, roles: str, emojis: str):
+@app_commands.describe(users="User(s) to watch for, space-separated (e.g. @user1 @user2)", emojis="Emojis to react with (space-separated)")
+async def usermention_setup(interaction: discord.Interaction, users: str, emojis: str):
     guild = guild_only(interaction)
-    found, invalid = parse_role_list(guild, roles)
+    found, invalid = parse_user_list(guild, users)
     if not found:
-        await interaction.response.send_message("❌ I couldn't find any valid roles in that list. Mention them like @staff @mods.", ephemeral=True)
+        await interaction.response.send_message("❌ I couldn't find any valid users in that list. Mention them like @user1 @user2.", ephemeral=True)
         return
 
     emoji_list = emojis.split()
-    role_ids = [str(r.id) for r in found]
-    upsert_settings(guild.id, rolemention_role_id=",".join(role_ids), rolemention_emojis=",".join(emoji_list))
+    user_ids = [str(u.id) for u in found]
+    upsert_settings(guild.id, usermention_user_id=",".join(user_ids), usermention_emojis=",".join(emoji_list))
 
-    role_display = " ".join(r.mention for r in found)
+    user_display = " ".join(u.mention for u in found)
     emoji_display = " ".join(emoji_list)
-    msg = f"{CHECK} Now reacting with {emoji_display} whenever someone mentions {role_display}"
+    msg = f"{CHECK} Now reacting with {emoji_display} whenever someone mentions {user_display}"
     if invalid:
         msg += f"\n⚠️ Skipped (not found): {', '.join(invalid)}"
     await interaction.response.send_message(msg, ephemeral=True)
 
 
-@bot.tree.command(name="rolemention_list", description="See which roles trigger an auto-react")
-async def rolemention_list(interaction: discord.Interaction):
+@bot.tree.command(name="usermention_list", description="See which users trigger an auto-react")
+async def usermention_list(interaction: discord.Interaction):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
-    if not settings or not settings["rolemention_role_id"]:
-        await interaction.response.send_message("No role-mention reactions set up. Use `/rolemention_setup`.", ephemeral=True)
+    if not settings or not settings["usermention_user_id"]:
+        await interaction.response.send_message("No user-mention reactions set up. Use `/usermention_setup`.", ephemeral=True)
         return
 
-    ids = [r for r in settings["rolemention_role_id"].split(",") if r.strip()]
-    roles = [guild.get_role(int(rid)) for rid in ids]
-    display = " ".join(r.mention for r in roles if r)
-    emoji_display = " ".join(settings["rolemention_emojis"].split(",")) if settings["rolemention_emojis"] else "*(none set)*"
-    await interaction.response.send_message(f"**Watched roles:** {display}\n**Emojis:** {emoji_display}", ephemeral=True)
+    ids = [u for u in settings["usermention_user_id"].split(",") if u.strip()]
+    display = " ".join(f"<@{uid}>" for uid in ids)
+    emoji_display = " ".join(settings["usermention_emojis"].split(",")) if settings["usermention_emojis"] else "*(none set)*"
+    await interaction.response.send_message(f"**Watched users:** {display}\n**Emojis:** {emoji_display}", ephemeral=True)
 
 
-@bot.tree.command(name="rolemention_clear", description="Turn off role-mention auto-react")
+@bot.tree.command(name="usermention_clear", description="Turn off user-mention auto-react")
 @app_commands.checks.has_permissions(manage_guild=True)
-async def rolemention_clear(interaction: discord.Interaction):
+async def usermention_clear(interaction: discord.Interaction):
     guild = guild_only(interaction)
-    upsert_settings(guild.id, rolemention_role_id="", rolemention_emojis="")
-    await interaction.response.send_message(f"{CHECK} Role-mention auto-react disabled.", ephemeral=True)
+    upsert_settings(guild.id, usermention_user_id="", usermention_emojis="")
+    await interaction.response.send_message(f"{CHECK} User-mention auto-react disabled.", ephemeral=True)
 
 
 @bot.tree.command(name="botmention_setup", description="Set the text the bot replies with when someone @'s it")
@@ -2232,9 +2279,10 @@ async def autoresponder_list(interaction: discord.Interaction):
     match_type="Match type",
     color="Embed color — theme name or hex (e.g. pink / blue / #f7cfe3)",
     thumbnail_url="Small image shown on the side/corner of the embed",
+    footer="Small text shown at the bottom of the embed",
 )
 @app_commands.choices(match_type=[app_commands.Choice(name="exact", value="exact"), app_commands.Choice(name="anywhere", value="anywhere")])
-async def imageresponder_add(interaction: discord.Interaction, trigger: str, image_url: str, caption: str | None = None, match_type: str = "exact", color: str = "pink", thumbnail_url: str | None = None):
+async def imageresponder_add(interaction: discord.Interaction, trigger: str, image_url: str, caption: str | None = None, match_type: str = "exact", color: str = "pink", thumbnail_url: str | None = None, footer: str | None = None):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip()
     conn = get_db()
@@ -2242,11 +2290,11 @@ async def imageresponder_add(interaction: discord.Interaction, trigger: str, ima
     
     try:
         cur.execute(
-            "INSERT INTO image_responders (guild_id, trigger, image_url, caption, match_type, color, thumbnail_url) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (guild.id, trigger, image_url, caption, match_type, color or "pink", thumbnail_url),
+            "INSERT INTO image_responders (guild_id, trigger, image_url, caption, match_type, color, thumbnail_url, footer) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (guild.id, trigger, image_url, caption, match_type, color or "pink", thumbnail_url, footer),
         )
         conn.commit()
-        preview = build_embed(title=None, description=caption or None, theme=color or "pink", image=image_url, thumbnail=thumbnail_url)
+        preview = build_embed(title=None, description=caption or None, theme=color or "pink", image=image_url, thumbnail=thumbnail_url, footer=footer or None)
         await interaction.response.send_message(f"{CHECK} Image responder `{trigger}` created! (match: {match_type})", embed=preview, ephemeral=True)
     except sqlite3.IntegrityError:
         await interaction.response.send_message(f"❌ Trigger `{trigger}` already exists.", ephemeral=True)
@@ -2263,9 +2311,10 @@ async def imageresponder_add(interaction: discord.Interaction, trigger: str, ima
     match_type="New match type",
     color="New embed color — theme name or hex ('none' clears back to pink)",
     thumbnail_url="New small side image URL ('none' to remove)",
+    footer="New footer text ('none' to remove)",
 )
 @app_commands.choices(match_type=[app_commands.Choice(name="exact", value="exact"), app_commands.Choice(name="anywhere", value="anywhere")])
-async def imageresponder_edit(interaction: discord.Interaction, trigger: str, image_url: str | None = None, caption: str | None = None, match_type: str | None = None, color: str | None = None, thumbnail_url: str | None = None):
+async def imageresponder_edit(interaction: discord.Interaction, trigger: str, image_url: str | None = None, caption: str | None = None, match_type: str | None = None, color: str | None = None, thumbnail_url: str | None = None, footer: str | None = None):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip()
     conn = get_db()
@@ -2286,14 +2335,18 @@ async def imageresponder_edit(interaction: discord.Interaction, trigger: str, im
         final_thumbnail = row["thumbnail_url"]
     else:
         final_thumbnail = None if thumbnail_url.lower() == "none" else thumbnail_url
+    if footer is None:
+        final_footer = row["footer"]
+    else:
+        final_footer = None if footer.lower() == "none" else footer
     cur.execute(
-        "UPDATE image_responders SET image_url = ?, caption = ?, match_type = ?, color = ?, thumbnail_url = ? WHERE guild_id = ? AND trigger = ?",
-        (final_image, final_caption, final_match, final_color, final_thumbnail, guild.id, trigger),
+        "UPDATE image_responders SET image_url = ?, caption = ?, match_type = ?, color = ?, thumbnail_url = ?, footer = ? WHERE guild_id = ? AND trigger = ?",
+        (final_image, final_caption, final_match, final_color, final_thumbnail, final_footer, guild.id, trigger),
     )
     conn.commit()
     conn.close()
     
-    preview = build_embed(title=None, description=final_caption or None, theme=final_color, image=final_image, thumbnail=final_thumbnail)
+    preview = build_embed(title=None, description=final_caption or None, theme=final_color, image=final_image, thumbnail=final_thumbnail, footer=final_footer)
     await interaction.response.send_message(f"{CHECK} Image responder `{trigger}` updated! (match: {final_match})", embed=preview, ephemeral=True)
 
 
@@ -2320,7 +2373,7 @@ async def imageresponder_list(interaction: discord.Interaction):
     guild = guild_only(interaction)
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT trigger, image_url, caption, match_type, color, thumbnail_url FROM image_responders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
+    cur.execute("SELECT trigger, image_url, caption, match_type, color, thumbnail_url, footer FROM image_responders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
     rows = cur.fetchall()
     conn.close()
     
@@ -2333,7 +2386,8 @@ async def imageresponder_list(interaction: discord.Interaction):
         caption_text = f"\nCaption: {row['caption']}" if row["caption"] else ""
         thumb_text = f"\nSide image: [link]({row['thumbnail_url']})" if row["thumbnail_url"] else ""
         color_text = f"\nColor: {row['color'] or 'pink'}"
-        embed.add_field(name=f"`{row['trigger']}` — {row['match_type'] or 'exact'}", value=f"[image]({row['image_url']}){caption_text}{color_text}{thumb_text}", inline=False)
+        footer_text = f"\nFooter: {row['footer']}" if row["footer"] else ""
+        embed.add_field(name=f"`{row['trigger']}` — {row['match_type'] or 'exact'}", value=f"[image]({row['image_url']}){caption_text}{color_text}{thumb_text}{footer_text}", inline=False)
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
