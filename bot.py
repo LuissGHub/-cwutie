@@ -60,6 +60,8 @@ SETTINGS_COLUMNS = [
     "boost_channel_id", "boost_text", "boost_outside_text", "boost_title", "boost_color", "boost_image_url", "boost_banner2_url", "boost_thumbnail_url", "boost_use_avatar",
     "boost_reaction_emoji", "boost_super_reaction",
     "autoreact_channel_id", "autoreact_reaction_emoji", "autoreact_super_reaction",
+    "rolemention_role_id", "rolemention_emojis",
+    "botmention_message",
     "ticket_category_id", "ticket_name_prefix",
     "showcase_channel_id", "showcase_text", "showcase_theme", "showcase_image2_url", "showcase_image3_url",
 ]
@@ -380,6 +382,34 @@ def parse_channel_list(guild: discord.Guild, raw: str) -> tuple[list[discord.Tex
         if channel.id not in seen:
             seen.add(channel.id)
             found.append(channel)
+    return found, invalid
+
+
+ROLE_MENTION_RE = re.compile(r'<@&(\d+)>')
+
+
+def parse_role_list(guild: discord.Guild, raw: str) -> tuple[list[discord.Role], list[str]]:
+    """Parses a space/comma-separated list of role mentions or raw IDs.
+    Returns (found_roles, invalid_tokens)."""
+    tokens = re.split(r'[\s,]+', raw.strip())
+    found: list[discord.Role] = []
+    invalid: list[str] = []
+    seen: set[int] = set()
+    for tok in tokens:
+        if not tok:
+            continue
+        m = ROLE_MENTION_RE.match(tok)
+        rid = m.group(1) if m else (tok if tok.isdigit() else None)
+        if not rid:
+            invalid.append(tok)
+            continue
+        role = guild.get_role(int(rid))
+        if not role:
+            invalid.append(tok)
+            continue
+        if role.id not in seen:
+            seen.add(role.id)
+            found.append(role)
     return found, invalid
 
 
@@ -1075,6 +1105,30 @@ async def on_message(message: discord.Message):
                                 await message.add_reaction(emoji)
                         except Exception as e:
                             print(f"[DEBUG] Failed to auto-react with {emoji}: {e}")
+
+    # Role mention reactions — someone @'d a configured role, react with emojis
+    if settings and settings["rolemention_role_id"] and message.role_mentions:
+        watched_role_ids = {int(r) for r in settings["rolemention_role_id"].split(",") if r.strip()}
+        mentioned_role_ids = {r.id for r in message.role_mentions}
+        if watched_role_ids & mentioned_role_ids:
+            reaction_emojis = settings["rolemention_emojis"]
+            if reaction_emojis:
+                emoji_list = [e.strip() for e in reaction_emojis.split(",") if e.strip()]
+                await asyncio.sleep(AUTOREACT_DELAY_SECONDS)
+                for emoji in emoji_list:
+                    try:
+                        await message.add_reaction(emoji)
+                    except Exception as e:
+                        print(f"[DEBUG] Failed to auto-react to role mention with {emoji}: {e}")
+
+    # Bot mention reply — someone @'d the bot directly, send a text reply
+    if bot.user in message.mentions:
+        reply_text = (settings["botmention_message"] if settings and settings["botmention_message"] else "👋 Hey, what's up?")
+        reply_text = reply_text.replace("{mention}", message.author.mention).replace("\\n", "\n")
+        try:
+            await message.reply(reply_text, mention_author=False)
+        except Exception as e:
+            print(f"[DEBUG] Failed to reply to bot mention: {e}")
 
     content = message.content.strip()
     content_lower = content.lower()
@@ -1962,6 +2016,73 @@ async def autoreact_clear(interaction: discord.Interaction):
     guild = guild_only(interaction)
     upsert_settings(guild.id, autoreact_channel_id="", autoreact_reaction_emoji="", autoreact_super_reaction="0")
     await interaction.response.send_message(f"{CHECK} Autoreact disabled.", ephemeral=True)
+
+
+# ———————————————––
+# Commands — Role Mention Reactions & Bot Mention Reply
+# ———————————————––
+
+@bot.tree.command(name="rolemention_setup", description="React with emojis whenever someone @'s a role")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(roles="Role(s) to watch for, space-separated (e.g. @staff @mods)", emojis="Emojis to react with (space-separated)")
+async def rolemention_setup(interaction: discord.Interaction, roles: str, emojis: str):
+    guild = guild_only(interaction)
+    found, invalid = parse_role_list(guild, roles)
+    if not found:
+        await interaction.response.send_message("❌ I couldn't find any valid roles in that list. Mention them like @staff @mods.", ephemeral=True)
+        return
+
+    emoji_list = emojis.split()
+    role_ids = [str(r.id) for r in found]
+    upsert_settings(guild.id, rolemention_role_id=",".join(role_ids), rolemention_emojis=",".join(emoji_list))
+
+    role_display = " ".join(r.mention for r in found)
+    emoji_display = " ".join(emoji_list)
+    msg = f"{CHECK} Now reacting with {emoji_display} whenever someone mentions {role_display}"
+    if invalid:
+        msg += f"\n⚠️ Skipped (not found): {', '.join(invalid)}"
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
+@bot.tree.command(name="rolemention_list", description="See which roles trigger an auto-react")
+async def rolemention_list(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    settings = get_settings(guild.id)
+    if not settings or not settings["rolemention_role_id"]:
+        await interaction.response.send_message("No role-mention reactions set up. Use `/rolemention_setup`.", ephemeral=True)
+        return
+
+    ids = [r for r in settings["rolemention_role_id"].split(",") if r.strip()]
+    roles = [guild.get_role(int(rid)) for rid in ids]
+    display = " ".join(r.mention for r in roles if r)
+    emoji_display = " ".join(settings["rolemention_emojis"].split(",")) if settings["rolemention_emojis"] else "*(none set)*"
+    await interaction.response.send_message(f"**Watched roles:** {display}\n**Emojis:** {emoji_display}", ephemeral=True)
+
+
+@bot.tree.command(name="rolemention_clear", description="Turn off role-mention auto-react")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def rolemention_clear(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, rolemention_role_id="", rolemention_emojis="")
+    await interaction.response.send_message(f"{CHECK} Role-mention auto-react disabled.", ephemeral=True)
+
+
+@bot.tree.command(name="botmention_setup", description="Set the text the bot replies with when someone @'s it")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(message="Reply text (use {mention} for the pinging user)")
+async def botmention_setup(interaction: discord.Interaction, message: str):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, botmention_message=message.replace("\\n", "\n"))
+    preview = message.replace("{mention}", interaction.user.mention).replace("\\n", "\n")
+    await interaction.response.send_message(f"{CHECK} Bot-mention reply set! Preview:\n{preview}", ephemeral=True)
+
+
+@bot.tree.command(name="botmention_clear", description="Reset the bot-mention reply back to the default")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def botmention_clear(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, botmention_message="")
+    await interaction.response.send_message(f"{CHECK} Bot-mention reply reset to default.", ephemeral=True)
 
 
 # ———————————————––
