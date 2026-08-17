@@ -64,6 +64,14 @@ SETTINGS_COLUMNS = [
     "showcase_channel_id", "showcase_text", "showcase_theme", "showcase_image2_url", "showcase_image3_url",
 ]
 
+# Columns for the image_responders table that were added after the table's
+# original release. Kept as (name, sql_type_and_default) pairs so init_db can
+# ALTER TABLE them onto any pre-existing database without wiping it.
+IMAGE_RESPONDER_COLUMNS = [
+    ("color", "TEXT DEFAULT 'pink'"),
+    ("thumbnail_url", "TEXT"),
+]
+
 # ———————————————––
 # Database Helpers
 # ———————————————––
@@ -188,10 +196,21 @@ def init_db() -> None:
             image_url TEXT NOT NULL,
             caption TEXT,
             match_type TEXT DEFAULT 'exact',
+            color TEXT DEFAULT 'pink',
+            thumbnail_url TEXT,
             UNIQUE(guild_id, trigger)
         )
         """
     )
+
+    # Carries "color" / "thumbnail_url" onto any image_responders table that
+    # was created before those columns existed (CREATE TABLE IF NOT EXISTS
+    # above only applies to brand-new tables).
+    for col, coldef in IMAGE_RESPONDER_COLUMNS:
+        try:
+            cur.execute(f"ALTER TABLE image_responders ADD COLUMN {col} {coldef}")
+        except sqlite3.OperationalError:
+            pass
 
     cur.execute(
         """
@@ -1079,13 +1098,19 @@ async def on_message(message: discord.Message):
     # Image responders
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT trigger, image_url, caption, match_type FROM image_responders WHERE guild_id = ?", (message.guild.id,))
+    cur.execute("SELECT trigger, image_url, caption, match_type, color, thumbnail_url FROM image_responders WHERE guild_id = ?", (message.guild.id,))
     all_imgs = cur.fetchall()
     conn.close()
 
     for img in all_imgs:
         if check_trigger(content_lower, img["trigger"], img["match_type"] or "exact"):
-            embed = build_embed(title=None, description=img["caption"] or None, theme="pink", image=img["image_url"])
+            embed = build_embed(
+                title=None,
+                description=img["caption"] or None,
+                theme=img["color"] or "pink",
+                image=img["image_url"],
+                thumbnail=img["thumbnail_url"] or None,
+            )
             await message.channel.send(embed=embed)
             break
 
@@ -2077,20 +2102,31 @@ async def autoresponder_list(interaction: discord.Interaction):
 # Commands — Image Responder
 # ———————————————––
 
-@bot.tree.command(name="imageresponder_add", description="Post an image when a keyword is triggered")
+@bot.tree.command(name="imageresponder_add", description="Post an image (with an embed) when a keyword is triggered")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(trigger="Keyword", image_url="Image URL", caption="Caption text", match_type="Match type")
+@app_commands.describe(
+    trigger="Keyword",
+    image_url="Big image URL (bottom of the embed)",
+    caption="Caption text (embed description)",
+    match_type="Match type",
+    color="Embed color — theme name or hex (e.g. pink / blue / #f7cfe3)",
+    thumbnail_url="Small image shown on the side/corner of the embed",
+)
 @app_commands.choices(match_type=[app_commands.Choice(name="exact", value="exact"), app_commands.Choice(name="anywhere", value="anywhere")])
-async def imageresponder_add(interaction: discord.Interaction, trigger: str, image_url: str, caption: str | None = None, match_type: str = "exact"):
+async def imageresponder_add(interaction: discord.Interaction, trigger: str, image_url: str, caption: str | None = None, match_type: str = "exact", color: str = "pink", thumbnail_url: str | None = None):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip()
     conn = get_db()
     cur = conn.cursor()
     
     try:
-        cur.execute("INSERT INTO image_responders (guild_id, trigger, image_url, caption, match_type) VALUES (?, ?, ?, ?, ?)", (guild.id, trigger, image_url, caption, match_type))
+        cur.execute(
+            "INSERT INTO image_responders (guild_id, trigger, image_url, caption, match_type, color, thumbnail_url) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (guild.id, trigger, image_url, caption, match_type, color or "pink", thumbnail_url),
+        )
         conn.commit()
-        await interaction.response.send_message(f"{CHECK} Image responder `{trigger}` created! (match: {match_type})", ephemeral=True)
+        preview = build_embed(title=None, description=caption or None, theme=color or "pink", image=image_url, thumbnail=thumbnail_url)
+        await interaction.response.send_message(f"{CHECK} Image responder `{trigger}` created! (match: {match_type})", embed=preview, ephemeral=True)
     except sqlite3.IntegrityError:
         await interaction.response.send_message(f"❌ Trigger `{trigger}` already exists.", ephemeral=True)
     finally:
@@ -2099,9 +2135,16 @@ async def imageresponder_add(interaction: discord.Interaction, trigger: str, ima
 
 @bot.tree.command(name="imageresponder_edit", description="Edit an image responder")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(trigger="Trigger to edit", image_url="New image URL", caption="New caption", match_type="New match type")
+@app_commands.describe(
+    trigger="Trigger to edit",
+    image_url="New big image URL",
+    caption="New caption",
+    match_type="New match type",
+    color="New embed color — theme name or hex ('none' clears back to pink)",
+    thumbnail_url="New small side image URL ('none' to remove)",
+)
 @app_commands.choices(match_type=[app_commands.Choice(name="exact", value="exact"), app_commands.Choice(name="anywhere", value="anywhere")])
-async def imageresponder_edit(interaction: discord.Interaction, trigger: str, image_url: str | None = None, caption: str | None = None, match_type: str | None = None):
+async def imageresponder_edit(interaction: discord.Interaction, trigger: str, image_url: str | None = None, caption: str | None = None, match_type: str | None = None, color: str | None = None, thumbnail_url: str | None = None):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip()
     conn = get_db()
@@ -2117,11 +2160,20 @@ async def imageresponder_edit(interaction: discord.Interaction, trigger: str, im
     final_image = image_url if image_url is not None else row["image_url"]
     final_caption = caption if caption is not None else row["caption"]
     final_match = match_type if match_type is not None else (row["match_type"] or "exact")
-    cur.execute("UPDATE image_responders SET image_url = ?, caption = ?, match_type = ? WHERE guild_id = ? AND trigger = ?", (final_image, final_caption, final_match, guild.id, trigger))
+    final_color = (row["color"] or "pink") if color is None else ("pink" if color.lower() == "none" else color)
+    if thumbnail_url is None:
+        final_thumbnail = row["thumbnail_url"]
+    else:
+        final_thumbnail = None if thumbnail_url.lower() == "none" else thumbnail_url
+    cur.execute(
+        "UPDATE image_responders SET image_url = ?, caption = ?, match_type = ?, color = ?, thumbnail_url = ? WHERE guild_id = ? AND trigger = ?",
+        (final_image, final_caption, final_match, final_color, final_thumbnail, guild.id, trigger),
+    )
     conn.commit()
     conn.close()
     
-    await interaction.response.send_message(f"{CHECK} Image responder `{trigger}` updated! (match: {final_match})", ephemeral=True)
+    preview = build_embed(title=None, description=final_caption or None, theme=final_color, image=final_image, thumbnail=final_thumbnail)
+    await interaction.response.send_message(f"{CHECK} Image responder `{trigger}` updated! (match: {final_match})", embed=preview, ephemeral=True)
 
 
 @bot.tree.command(name="imageresponder_remove", description="Delete an image responder")
@@ -2147,7 +2199,7 @@ async def imageresponder_list(interaction: discord.Interaction):
     guild = guild_only(interaction)
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT trigger, image_url, caption, match_type FROM image_responders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
+    cur.execute("SELECT trigger, image_url, caption, match_type, color, thumbnail_url FROM image_responders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
     rows = cur.fetchall()
     conn.close()
     
@@ -2158,7 +2210,9 @@ async def imageresponder_list(interaction: discord.Interaction):
     embed = discord.Embed(title="🖼️ Image Responders", color=get_theme_color("pink"))
     for row in rows:
         caption_text = f"\nCaption: {row['caption']}" if row["caption"] else ""
-        embed.add_field(name=f"`{row['trigger']}` — {row['match_type'] or 'exact'}", value=f"[image]({row['image_url']}){caption_text}", inline=False)
+        thumb_text = f"\nSide image: [link]({row['thumbnail_url']})" if row["thumbnail_url"] else ""
+        color_text = f"\nColor: {row['color'] or 'pink'}"
+        embed.add_field(name=f"`{row['trigger']}` — {row['match_type'] or 'exact'}", value=f"[image]({row['image_url']}){caption_text}{color_text}{thumb_text}", inline=False)
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
