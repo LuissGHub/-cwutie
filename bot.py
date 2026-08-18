@@ -1145,6 +1145,7 @@ async def on_message(message: discord.Message):
 
     # Autoreact
     settings = get_settings(message.guild.id)
+    autoreact_channel_ids: set[int] = set()
     if settings and settings["autoreact_channel_id"]:
         autoreact_channel_ids = {int(c) for c in settings["autoreact_channel_id"].split(",") if c.strip()}
         if message.channel.id in autoreact_channel_ids:
@@ -1176,8 +1177,16 @@ async def on_message(message: discord.Message):
                         except Exception as e:
                             print(f"[DEBUG] Failed to auto-react with {emoji}: {e}")
 
-    # User mention reactions — someone @'d a specific configured user, react with emojis
-    if settings and settings["usermention_user_id"] and message.mentions:
+    # User mention reactions — someone @'d a specific configured user, react with emojis.
+    # Skipped in autoreact/vouch channels: those channels already auto-react to
+    # every message there, so also firing this would double-react whenever the
+    # watched user gets @'d in a vouch post.
+    if (
+        settings
+        and settings["usermention_user_id"]
+        and message.mentions
+        and message.channel.id not in autoreact_channel_ids
+    ):
         watched_user_ids = {int(u) for u in settings["usermention_user_id"].split(",") if u.strip()}
         mentioned_user_ids = {u.id for u in message.mentions}
         if watched_user_ids & mentioned_user_ids:
@@ -2110,7 +2119,7 @@ async def usermention_setup(interaction: discord.Interaction, users: str, emojis
 
     user_display = " ".join(u.mention for u in found)
     emoji_display = " ".join(emoji_list)
-    msg = f"{CHECK} Now reacting with {emoji_display} whenever someone mentions {user_display}"
+    msg = f"{CHECK} Now reacting with {emoji_display} whenever someone mentions {user_display}\n*(Note: this is skipped for messages posted in an autoreact/vouch channel, since that channel already reacts to every message.)*"
     if invalid:
         msg += f"\n⚠️ Skipped (not found): {', '.join(invalid)}"
     await interaction.response.send_message(msg, ephemeral=True)
@@ -2127,7 +2136,7 @@ async def usermention_list(interaction: discord.Interaction):
     ids = [u for u in settings["usermention_user_id"].split(",") if u.strip()]
     display = " ".join(f"<@{uid}>" for uid in ids)
     emoji_display = " ".join(settings["usermention_emojis"].split(",")) if settings["usermention_emojis"] else "*(none set)*"
-    await interaction.response.send_message(f"**Watched users:** {display}\n**Emojis:** {emoji_display}", ephemeral=True)
+    await interaction.response.send_message(f"**Watched users:** {display}\n**Emojis:** {emoji_display}\n*(Skipped inside autoreact/vouch channels.)*", ephemeral=True)
 
 
 @bot.tree.command(name="usermention_clear", description="Turn off user-mention auto-react")
