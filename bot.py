@@ -61,6 +61,7 @@ SETTINGS_COLUMNS = [
     "boost_reaction_emoji", "boost_super_reaction",
     "autoreact_channel_id", "autoreact_reaction_emoji", "autoreact_super_reaction",
     "usermention_user_id", "usermention_emojis",
+    "vouch_channel_id", "waitlist_role_id",
     "botmention_message",
     "ticket_category_id", "ticket_name_prefix",
     "showcase_channel_id", "showcase_text", "showcase_theme", "showcase_image2_url", "showcase_image3_url",
@@ -1199,6 +1200,40 @@ async def on_message(message: discord.Message):
                         await message.add_reaction(emoji)
                     except Exception as e:
                         print(f"[DEBUG] Failed to auto-react to user mention with {emoji}: {e}")
+
+    # Vouch — someone posted in the vouch channel: strip their waitlist role and
+    # take their ticket channel off the waitlist chart. Gated on the poster
+    # actually having the waitlist role — staff/admins posting in the channel
+    # (testing, chatting, etc.) won't have that role, so this is a no-op for
+    # you and your team, not just customers.
+    #
+    # We don't have a stored link from "person" to "their ticket channel", so
+    # once we know they're a genuine waitlisted customer we match by access:
+    # your ticket bot only grants the customer (and staff) view access to their
+    # own ticket, so whichever waitlisted channel this author can actually see
+    # is almost certainly theirs. If that's ambiguous (0 or 2+ matches), we
+    # skip the chart removal rather than guess wrong — the role removal still happens.
+    if settings and settings["vouch_channel_id"] and message.channel.id == int(settings["vouch_channel_id"]):
+        waitlist_role = message.guild.get_role(int(settings["waitlist_role_id"])) if settings["waitlist_role_id"] else None
+        if waitlist_role and waitlist_role in message.author.roles:
+            try:
+                await message.author.remove_roles(waitlist_role)
+            except discord.Forbidden as e:
+                print(f"[DEBUG] Failed to remove waitlist role from {message.author.id}: {e}")
+
+            vouch_data = load_waitlists()
+            vouch_key = get_waitlist_key(message.guild.id)
+            if vouch_key in vouch_data:
+                matches = []
+                for e in vouch_data[vouch_key]["users"]:
+                    cid = entry_id(e)
+                    ch = message.guild.get_channel(int(cid))
+                    if ch and ch.permissions_for(message.author).view_channel:
+                        matches.append(cid)
+                if len(matches) == 1:
+                    await remove_waitlist_entry_by_channel(bot, message.guild.id, int(matches[0]))
+                elif len(matches) > 1:
+                    print(f"[DEBUG] Vouch from {message.author.id} matched multiple waitlist entries {matches}; skipped auto-removal")
 
     # Bot mention reply — someone @'d the bot directly, send a text reply
     if bot.user in message.mentions:
@@ -2589,6 +2624,30 @@ async def waitlist_move(interaction: discord.Interaction):
     
     view = WaitlistMovePickView(entries, interaction.guild)
     await interaction.response.send_message("Pick an entry to move:", view=view, ephemeral=True)
+
+
+# ———————————————––
+# Commands — Vouch (auto-remove from waitlist)
+# ———————————————––
+
+@bot.tree.command(name="vouch_setup", description="When someone posts in the vouch channel, remove their waitlist role + waitlist chart entry")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(channel="Channel where vouches get posted", role="Role to remove from the person (e.g. Waitlisted)")
+async def vouch_setup(interaction: discord.Interaction, channel: discord.TextChannel, role: discord.Role):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, vouch_channel_id=str(channel.id), waitlist_role_id=str(role.id))
+    await interaction.response.send_message(
+        f"{CHECK} Vouch auto-removal set up!\nWhen someone posts in {channel.mention}, I'll remove {role.mention} from them and take their ticket channel off the waitlist chart (matched by which waitlisted channel they can see).",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="vouch_clear", description="Turn off vouch auto-removal")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def vouch_clear(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, vouch_channel_id="", waitlist_role_id="")
+    await interaction.response.send_message(f"{CHECK} Vouch auto-removal disabled.", ephemeral=True)
 
 
 # ———————————————––
