@@ -1,4 +1,6 @@
 import os
+import sys
+sys.stdout.reconfigure(line_buffering=True)
 import sqlite3
 import asyncio
 import json
@@ -1051,14 +1053,19 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     if not isinstance(channel, discord.TextChannel):
         return
 
+    print(f"[DEBUG] on_guild_channel_create fired for #{channel.name} ({channel.id}) in category {channel.category.id if channel.category else None}")
+
     settings = get_settings(channel.guild.id)
     if not settings or not settings["ticket_category_id"] or not settings["ticket_name_prefix"]:
+        print(f"[DEBUG] Skipping #{channel.name}: no ticket_category_id/ticket_name_prefix configured (run /waitlist_ticket_config)")
         return
 
     if not channel.category or str(channel.category.id) != str(settings["ticket_category_id"]):
+        print(f"[DEBUG] Skipping #{channel.name}: category {channel.category.id if channel.category else None} != configured {settings['ticket_category_id']}")
         return
 
     if not channel.name.lower().startswith(settings["ticket_name_prefix"].lower()):
+        print(f"[DEBUG] Skipping #{channel.name}: name doesn't start with configured prefix '{settings['ticket_name_prefix']}'")
         return
 
     owner_id = None
@@ -1066,11 +1073,13 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     try:
         member_overwrites = [
             member for member, perms in channel.overwrites.items()
-            if isinstance(member, discord.Member) and perms.view_channel and member.id != bot.user.id
+            if isinstance(member, discord.Member) and perms.view_channel and not member.bot
         ]
         if len(member_overwrites) == 1:
             owner_member = member_overwrites[0]
             owner_id = owner_member.id
+        elif len(member_overwrites) != 1:
+            print(f"[DEBUG] Ticket channel {channel.id}: found {len(member_overwrites)} non-bot member overwrite(s) ({[m.id for m in member_overwrites]}), can't tell who owns it")
     except Exception as e:
         print(f"[DEBUG] Failed to inspect overwrites for new ticket channel {channel.id}: {e}")
 
