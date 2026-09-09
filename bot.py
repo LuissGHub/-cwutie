@@ -44,6 +44,12 @@ CHECK = "<a:0000:1488556886918824068>"
 AUTOREACT_DELAY_SECONDS = 2
 STICKY_DELAY_SECONDS = 2
 
+# How long to wait after a ticket channel is created before reading its
+# opening message to look for a customer ping. Ticket bots send that message
+# a moment after the channel itself exists, so reading immediately can miss
+# it entirely.
+TICKET_OWNER_PING_DELAY_SECONDS = 3
+
 # Staff who automatically get individual view access to EVERY ticket, no
 # matter who opens it (e.g. the owner). These are always excluded when the
 # bot tries to figure out who a ticket's actual customer is, so they don't
@@ -613,6 +619,26 @@ async def add_waitlist_entry_for_channel(bot, guild_id: int, channel_id: int, us
     return True
 
 
+async def detect_ticket_owner_from_ping(channel: discord.TextChannel, ignore_ids: set[int]) -> discord.Member | None:
+    """Most ticket bots (tickets.bot included) @ the customer directly in the
+    opening embed/message — e.g. '@ticket perm @staff @romi'. That's a much
+    more reliable signal than guessing ownership from permission overwrites,
+    since it's just reading who got pinged instead of inferring it. Looks at
+    the first few messages in the channel (posted by a bot, since that's the
+    ticket tool itself) and returns the single non-staff, non-ignored user
+    mentioned there, if there's exactly one candidate."""
+    try:
+        async for msg in channel.history(limit=5, oldest_first=True):
+            if not msg.author.bot:
+                continue
+            candidates = [m for m in msg.mentions if not m.bot and m.id not in ignore_ids]
+            if len(candidates) == 1:
+                return candidates[0]
+    except Exception as e:
+        print(f"[DEBUG] Failed to read ticket-open message for owner ping in {channel.id}: {e}")
+    return None
+
+
 async def remove_waitlist_entry_by_channel(bot, guild_id: int, channel_id: int) -> bool:
     """Removes a channel from the guild's waitlist (if present) and refreshes
     the waitlist embed. Returns True if an entry was actually removed."""
@@ -1049,15 +1075,20 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     tickets show up. If the channel lands in the configured ticket category
     and matches the configured name prefix, add it to the waitlist automatically.
 
-    Also tries to work out *who* the ticket belongs to, by looking at the
-    channel's own permission overwrites: a ticket bot typically grants view
-    access to the customer specifically (as a member overwrite, not a role),
-    so if exactly one non-bot member has an explicit view overwrite on the
-    new channel, that's almost certainly the customer. Storing that up front
-    means vouch auto-removal (see on_message) can match this ticket to its
-    customer exactly instead of guessing later — this is what makes removal
-    reliable across every kind of ticket, not just the ones where the
-    permission-guess fallback happens to land on a single channel."""
+    Also tries to work out *who* the ticket belongs to, in two steps:
+      1. Read the ticket bot's own opening message for a direct ping — most
+         ticket bots @ the customer by name right in the welcome embed, which
+         is a hard fact instead of a guess.
+      2. Fall back to the channel's own permission overwrites: a ticket bot
+         typically grants view access to the customer specifically (as a
+         member overwrite, not a role), so if exactly one non-bot member has
+         an explicit view overwrite on the new channel, that's almost
+         certainly the customer.
+    Storing that up front means vouch auto-removal (see on_message) can match
+    this ticket to its customer exactly instead of guessing later — this is
+    what makes removal reliable across every kind of ticket, not just the
+    ones where the permission-guess fallback happens to land on a single
+    channel."""
     if not isinstance(channel, discord.TextChannel):
         return
 
@@ -1078,19 +1109,30 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
 
     owner_id = None
     owner_member = None
-    try:
-        ignore_ids = ALWAYS_IGNORE_TICKET_USER_IDS | {int(u) for u in (settings["ticket_ignore_user_ids"] or "").split(",") if u.strip()}
-        member_overwrites = [
-            member for member, perms in channel.overwrites.items()
-            if isinstance(member, discord.Member) and perms.view_channel and not member.bot and member.id not in ignore_ids
-        ]
-        if len(member_overwrites) == 1:
-            owner_member = member_overwrites[0]
-            owner_id = owner_member.id
-        elif len(member_overwrites) != 1:
-            print(f"[DEBUG] Ticket channel {channel.id}: found {len(member_overwrites)} non-bot, non-ignored member overwrite(s) ({[m.id for m in member_overwrites]}), can't tell who owns it")
-    except Exception as e:
-        print(f"[DEBUG] Failed to inspect overwrites for new ticket channel {channel.id}: {e}")
+    ignore_ids = ALWAYS_IGNORE_TICKET_USER_IDS | {int(u) for u in (settings["ticket_ignore_user_ids"] or "").split(",") if u.strip()}
+
+    # Step 1: give the ticket bot a moment to post its opening message, then
+    # try to read the customer straight off its ping.
+    await asyncio.sleep(TICKET_OWNER_PING_DELAY_SECONDS)
+    owner_member = await detect_ticket_owner_from_ping(channel, ignore_ids)
+    if owner_member:
+        owner_id = owner_member.id
+        print(f"[DEBUG] Ticket channel {channel.id}: owner detected from opening-message ping ({owner_member.id})")
+    else:
+        # Step 2: fall back to guessing from permission overwrites.
+        try:
+            member_overwrites = [
+                member for member, perms in channel.overwrites.items()
+                if isinstance(member, discord.Member) and perms.view_channel and not member.bot and member.id not in ignore_ids
+            ]
+            if len(member_overwrites) == 1:
+                owner_member = member_overwrites[0]
+                owner_id = owner_member.id
+                print(f"[DEBUG] Ticket channel {channel.id}: owner detected from permission-overwrite fallback ({owner_member.id})")
+            else:
+                print(f"[DEBUG] Ticket channel {channel.id}: found {len(member_overwrites)} non-bot, non-ignored member overwrite(s) ({[m.id for m in member_overwrites]}), can't tell who owns it")
+        except Exception as e:
+            print(f"[DEBUG] Failed to inspect overwrites for new ticket channel {channel.id}: {e}")
 
     try:
         await add_waitlist_entry_for_channel(bot, channel.guild.id, channel.id, owner_id)
