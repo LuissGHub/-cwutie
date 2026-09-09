@@ -44,6 +44,14 @@ CHECK = "<a:0000:1488556886918824068>"
 AUTOREACT_DELAY_SECONDS = 2
 STICKY_DELAY_SECONDS = 2
 
+# Staff who automatically get individual view access to EVERY ticket, no
+# matter who opens it (e.g. the owner). These are always excluded when the
+# bot tries to figure out who a ticket's actual customer is, so they don't
+# get mistaken for the customer. /waitlist_ticket_config's ignore_users
+# option adds more per-server without touching code, but these two are
+# always ignored everywhere.
+ALWAYS_IGNORE_TICKET_USER_IDS = {1477820178501861446, 694219914730537102}
+
 THEMES = {
     "pink": 0xF7CFE3,
     "blue": 0xCFEFFF,
@@ -65,7 +73,7 @@ SETTINGS_COLUMNS = [
     "usermention_user_id", "usermention_emojis",
     "vouch_channel_id", "waitlist_role_id",
     "botmention_message",
-    "ticket_category_id", "ticket_name_prefix",
+    "ticket_category_id", "ticket_name_prefix", "ticket_ignore_user_ids",
     "showcase_channel_id", "showcase_text", "showcase_theme", "showcase_image2_url", "showcase_image3_url",
 ]
 
@@ -1071,15 +1079,16 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     owner_id = None
     owner_member = None
     try:
+        ignore_ids = ALWAYS_IGNORE_TICKET_USER_IDS | {int(u) for u in (settings["ticket_ignore_user_ids"] or "").split(",") if u.strip()}
         member_overwrites = [
             member for member, perms in channel.overwrites.items()
-            if isinstance(member, discord.Member) and perms.view_channel and not member.bot
+            if isinstance(member, discord.Member) and perms.view_channel and not member.bot and member.id not in ignore_ids
         ]
         if len(member_overwrites) == 1:
             owner_member = member_overwrites[0]
             owner_id = owner_member.id
         elif len(member_overwrites) != 1:
-            print(f"[DEBUG] Ticket channel {channel.id}: found {len(member_overwrites)} non-bot member overwrite(s) ({[m.id for m in member_overwrites]}), can't tell who owns it")
+            print(f"[DEBUG] Ticket channel {channel.id}: found {len(member_overwrites)} non-bot, non-ignored member overwrite(s) ({[m.id for m in member_overwrites]}), can't tell who owns it")
     except Exception as e:
         print(f"[DEBUG] Failed to inspect overwrites for new ticket channel {channel.id}: {e}")
 
@@ -2696,21 +2705,34 @@ async def waitlist_remove(interaction: discord.Interaction):
 
 @bot.tree.command(name="waitlist_ticket_config", description="Auto-add new ticket channels to the waitlist")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(category="Category your ticket bot creates tickets under", prefix="Name prefix tickets start with (e.g. ticket-)")
-async def waitlist_ticket_config(interaction: discord.Interaction, category: discord.CategoryChannel, prefix: str):
+@app_commands.describe(
+    category="Category your ticket bot creates tickets under",
+    prefix="Name prefix tickets start with (e.g. ticket-)",
+    ignore_users="Staff who get individual access on EVERY ticket (e.g. the owner), space-separated — so they're not mistaken for the customer",
+)
+async def waitlist_ticket_config(interaction: discord.Interaction, category: discord.CategoryChannel, prefix: str, ignore_users: str | None = None):
     guild = guild_only(interaction)
-    upsert_settings(guild.id, ticket_category_id=str(category.id), ticket_name_prefix=prefix.strip())
-    await interaction.response.send_message(
-        f"{CHECK} New channels created under **{category.name}** starting with `{prefix.strip()}` will be added to the waitlist automatically.",
-        ephemeral=True,
-    )
+    kwargs = dict(ticket_category_id=str(category.id), ticket_name_prefix=prefix.strip())
+
+    msg = f"{CHECK} New channels created under **{category.name}** starting with `{prefix.strip()}` will be added to the waitlist automatically."
+
+    if ignore_users is not None:
+        found, invalid = parse_user_list(guild, ignore_users)
+        kwargs["ticket_ignore_user_ids"] = ",".join(str(u.id) for u in found) if found else ""
+        if found:
+            msg += f"\nIgnoring for customer-detection: {' '.join(u.mention for u in found)}"
+        if invalid:
+            msg += f"\n⚠️ Skipped (not found): {', '.join(invalid)}"
+
+    upsert_settings(guild.id, **kwargs)
+    await interaction.response.send_message(msg, ephemeral=True)
 
 
 @bot.tree.command(name="waitlist_ticket_config_clear", description="Turn off auto-adding new tickets to the waitlist")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def waitlist_ticket_config_clear(interaction: discord.Interaction):
     guild = guild_only(interaction)
-    upsert_settings(guild.id, ticket_category_id="", ticket_name_prefix="")
+    upsert_settings(guild.id, ticket_category_id="", ticket_name_prefix="", ticket_ignore_user_ids="")
     await interaction.response.send_message(f"{CHECK} Auto-adding new tickets to the waitlist is now off.", ephemeral=True)
 
 
