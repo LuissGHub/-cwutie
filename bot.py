@@ -519,6 +519,28 @@ def entry_label(entry) -> str | None:
     return entry.get("label") if isinstance(entry, dict) else None
 
 
+def entry_user_id(entry) -> str | None:
+    """The customer's user id this ticket channel belongs to, if it's been
+    linked (via /waitlist_add's user option, /waitlist_user_add, or
+    auto-detected at ticket creation). Entries added before this existed
+    simply won't have it — vouch matching falls back to guessing by channel
+    permissions for those."""
+    return entry.get("user_id") if isinstance(entry, dict) else None
+
+
+def build_entry(cid: str, label: str | None = None, user_id: int | str | None = None):
+    """Builds a waitlist entry, keeping it as a plain channel-id string when
+    there's no extra metadata to store (so old/simple entries stay simple),
+    and a dict otherwise. Pass an existing entry's label/user_id through when
+    you only mean to change one of the two fields, so the other isn't lost."""
+    data: dict = {"id": cid}
+    if label:
+        data["label"] = label
+    if user_id:
+        data["user_id"] = str(user_id)
+    return data if len(data) > 1 else cid
+
+
 def build_waitlist_embed(guild, title, entries, color="pink"):
     lines = []
     for i, entry in enumerate(entries, start=1):
@@ -558,10 +580,13 @@ async def update_waitlist_message(bot, guild_id: int):
         pass
 
 
-async def add_waitlist_entry_for_channel(bot, guild_id: int, channel_id: int) -> bool:
+async def add_waitlist_entry_for_channel(bot, guild_id: int, channel_id: int, user_id: int | None = None) -> bool:
     """Adds a channel to the guild's waitlist (if one exists and it isn't
     already in there) and refreshes the waitlist embed. Returns True if an
-    entry was actually added."""
+    entry was actually added. If user_id is given (e.g. detected from the
+    ticket channel's own permission overwrites at creation time), it's
+    stored on the entry so vouch auto-removal can match this ticket to its
+    customer exactly instead of guessing by channel-view permissions."""
     data = load_waitlists()
     key = get_waitlist_key(guild_id)
     if key not in data:
@@ -572,7 +597,7 @@ async def add_waitlist_entry_for_channel(bot, guild_id: int, channel_id: int) ->
     if any(entry_id(e) == cid for e in entries):
         return False
 
-    entries.append(cid)
+    entries.append(build_entry(cid, None, user_id))
     save_waitlists(data)
     await update_waitlist_message(bot, guild_id)
     return True
@@ -1012,7 +1037,17 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     """Fires whenever a new channel is created — which is how your ticket bot's
     tickets show up. If the channel lands in the configured ticket category
-    and matches the configured name prefix, add it to the waitlist automatically."""
+    and matches the configured name prefix, add it to the waitlist automatically.
+
+    Also tries to work out *who* the ticket belongs to, by looking at the
+    channel's own permission overwrites: a ticket bot typically grants view
+    access to the customer specifically (as a member overwrite, not a role),
+    so if exactly one non-bot member has an explicit view overwrite on the
+    new channel, that's almost certainly the customer. Storing that up front
+    means vouch auto-removal (see on_message) can match this ticket to its
+    customer exactly instead of guessing later — this is what makes removal
+    reliable across every kind of ticket, not just the ones where the
+    permission-guess fallback happens to land on a single channel."""
     if not isinstance(channel, discord.TextChannel):
         return
 
@@ -1026,10 +1061,31 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     if not channel.name.lower().startswith(settings["ticket_name_prefix"].lower()):
         return
 
+    owner_id = None
+    owner_member = None
     try:
-        await add_waitlist_entry_for_channel(bot, channel.guild.id, channel.id)
+        member_overwrites = [
+            member for member, perms in channel.overwrites.items()
+            if isinstance(member, discord.Member) and perms.view_channel and member.id != bot.user.id
+        ]
+        if len(member_overwrites) == 1:
+            owner_member = member_overwrites[0]
+            owner_id = owner_member.id
+    except Exception as e:
+        print(f"[DEBUG] Failed to inspect overwrites for new ticket channel {channel.id}: {e}")
+
+    try:
+        await add_waitlist_entry_for_channel(bot, channel.guild.id, channel.id, owner_id)
     except Exception as e:
         print(f"[DEBUG] Failed to auto-add waitlist entry for new ticket channel {channel.id}: {e}")
+
+    # If we could tell who opened the ticket and they're currently boosting
+    # the server, drop a reminder in the new channel so staff notice.
+    if owner_member and owner_member.premium_since:
+        try:
+            await channel.send("reminder this person is boosting 🫧🪽🍓")
+        except Exception as e:
+            print(f"[DEBUG] Failed to send booster reminder in new ticket channel {channel.id}: {e}")
 
 
 @bot.event
@@ -1207,12 +1263,19 @@ async def on_message(message: discord.Message):
     # (testing, chatting, etc.) won't have that role, so this is a no-op for
     # you and your team, not just customers.
     #
-    # We don't have a stored link from "person" to "their ticket channel", so
-    # once we know they're a genuine waitlisted customer we match by access:
-    # your ticket bot only grants the customer (and staff) view access to their
-    # own ticket, so whichever waitlisted channel this author can actually see
-    # is almost certainly theirs. If that's ambiguous (0 or 2+ matches), we
-    # skip the chart removal rather than guess wrong — the role removal still happens.
+    # Matching, in order:
+    #   1. Exact match — any waitlist entry that's been *linked* to this user
+    #      (via /waitlist_add's user option, /waitlist_user_add, or
+    #      auto-detected at ticket creation from the channel's permission
+    #      overwrites) is removed directly. No guessing involved.
+    #   2. Fallback for older/unlinked entries — we don't have a stored link
+    #      from "person" to "their ticket channel" for those, so we match by
+    #      access instead: a ticket bot typically only grants the customer
+    #      (and staff) view access to their own ticket, so whichever
+    #      *unlinked* waitlisted channel this author can actually see is
+    #      almost certainly theirs. If that's ambiguous (0 or 2+ matches), we
+    #      skip the chart removal rather than guess wrong — the role removal
+    #      still happens either way.
     if settings and settings["vouch_channel_id"] and message.channel.id == int(settings["vouch_channel_id"]):
         waitlist_role = message.guild.get_role(int(settings["waitlist_role_id"])) if settings["waitlist_role_id"] else None
         if waitlist_role and waitlist_role in message.author.roles:
@@ -1224,16 +1287,27 @@ async def on_message(message: discord.Message):
             vouch_data = load_waitlists()
             vouch_key = get_waitlist_key(message.guild.id)
             if vouch_key in vouch_data:
-                matches = []
-                for e in vouch_data[vouch_key]["users"]:
-                    cid = entry_id(e)
-                    ch = message.guild.get_channel(int(cid))
-                    if ch and ch.permissions_for(message.author).view_channel:
-                        matches.append(cid)
-                if len(matches) == 1:
-                    await remove_waitlist_entry_by_channel(bot, message.guild.id, int(matches[0]))
-                elif len(matches) > 1:
-                    print(f"[DEBUG] Vouch from {message.author.id} matched multiple waitlist entries {matches}; skipped auto-removal")
+                entries = vouch_data[vouch_key]["users"]
+                linked_matches = [entry_id(e) for e in entries if entry_user_id(e) == str(message.author.id)]
+
+                if linked_matches:
+                    for cid in linked_matches:
+                        await remove_waitlist_entry_by_channel(bot, message.guild.id, int(cid))
+                else:
+                    matches = []
+                    for e in entries:
+                        if entry_user_id(e):
+                            # Linked to someone else — not a candidate for this
+                            # user, and already ruled out above.
+                            continue
+                        cid = entry_id(e)
+                        ch = message.guild.get_channel(int(cid))
+                        if ch and ch.permissions_for(message.author).view_channel:
+                            matches.append(cid)
+                    if len(matches) == 1:
+                        await remove_waitlist_entry_by_channel(bot, message.guild.id, int(matches[0]))
+                    elif len(matches) > 1:
+                        print(f"[DEBUG] Vouch from {message.author.id} matched multiple waitlist entries {matches}; skipped auto-removal")
 
     # Bot mention reply — someone @'d the bot directly, send a text reply
     if bot.user in message.mentions:
@@ -2531,8 +2605,8 @@ async def waitlist_create(interaction: discord.Interaction, title: str | None = 
 
 
 @bot.tree.command(name="waitlist_add", description="Add a channel to the waitlist")
-@app_commands.describe(channel="Order channel", label="Optional label")
-async def waitlist_add(interaction: discord.Interaction, channel: discord.TextChannel, label: str | None = None):
+@app_commands.describe(channel="Order channel", label="Optional label", user="Customer this ticket belongs to (makes vouch auto-removal exact instead of guessed)")
+async def waitlist_add(interaction: discord.Interaction, channel: discord.TextChannel, label: str | None = None, user: discord.Member | None = None):
     data = load_waitlists()
     key = get_waitlist_key(interaction.guild.id)
     if key not in data:
@@ -2544,12 +2618,35 @@ async def waitlist_add(interaction: discord.Interaction, channel: discord.TextCh
         await interaction.response.send_message("That channel is already in the waitlist.", ephemeral=True)
         return
     
-    entry = {"id": cid, "label": label} if label else cid
+    entry = build_entry(cid, label, user.id if user else None)
     data[key]["users"].append(entry)
     save_waitlists(data)
     await update_waitlist_message(bot, interaction.guild.id)
     suffix = f" — {label}" if label else ""
+    if user:
+        suffix += f" (linked to {user.mention})"
     await interaction.response.send_message(f"{CHECK} Added {channel.mention}{suffix}", ephemeral=True)
+
+
+@bot.tree.command(name="waitlist_user_add", description="Link a customer to a waitlist entry so vouch auto-removal matches them exactly")
+@app_commands.describe(channel="Order channel already in the waitlist", user="Customer this ticket belongs to")
+async def waitlist_user_add(interaction: discord.Interaction, channel: discord.TextChannel, user: discord.Member):
+    data = load_waitlists()
+    key = get_waitlist_key(interaction.guild.id)
+    if key not in data:
+        await interaction.response.send_message("No waitlist found. Run /waitlist_create first.", ephemeral=True)
+        return
+
+    cid = str(channel.id)
+    entries = data[key]["users"]
+    for i, e in enumerate(entries):
+        if entry_id(e) == cid:
+            entries[i] = build_entry(cid, entry_label(e), user.id)
+            save_waitlists(data)
+            await interaction.response.send_message(f"{CHECK} Linked {user.mention} to {channel.mention}. Vouching from them will now remove this entry exactly, no guessing.", ephemeral=True)
+            return
+
+    await interaction.response.send_message(f"{channel.mention} isn't in the waitlist yet. Use `/waitlist_add` first.", ephemeral=True)
 
 
 @bot.tree.command(name="waitlist_label", description="Set or update a waitlist entry label")
@@ -2565,7 +2662,7 @@ async def waitlist_label(interaction: discord.Interaction, channel: discord.Text
     entries = data[key]["users"]
     for i, e in enumerate(entries):
         if entry_id(e) == cid:
-            entries[i] = {"id": cid, "label": label} if label else cid
+            entries[i] = build_entry(cid, label, entry_user_id(e))
             save_waitlists(data)
             await update_waitlist_message(bot, interaction.guild.id)
             msg = f"{CHECK} Updated label for {channel.mention} → **{label}**" if label else f"{CHECK} Cleared label for {channel.mention}"
@@ -2637,7 +2734,7 @@ async def vouch_setup(interaction: discord.Interaction, channel: discord.TextCha
     guild = guild_only(interaction)
     upsert_settings(guild.id, vouch_channel_id=str(channel.id), waitlist_role_id=str(role.id))
     await interaction.response.send_message(
-        f"{CHECK} Vouch auto-removal set up!\nWhen someone posts in {channel.mention}, I'll remove {role.mention} from them and take their ticket channel off the waitlist chart (matched by which waitlisted channel they can see).",
+        f"{CHECK} Vouch auto-removal set up!\nWhen someone posts in {channel.mention}, I'll remove {role.mention} from them and take their ticket channel off the waitlist chart (exactly, if their ticket was linked to them; otherwise matched by which waitlisted channel they can see).",
         ephemeral=True,
     )
 
@@ -2689,6 +2786,42 @@ async def role_remove(interaction: discord.Interaction, user: discord.Member, ro
 
 
 bot.tree.add_command(role_group)
+
+
+# ———————————————––
+# Commands — Channel Access
+# ———————————————––
+
+@bot.tree.command(name="adduser", description="Add a user to the channel you're in (gives them view + send access)")
+@app_commands.checks.has_permissions(manage_channels=True)
+@app_commands.describe(user="User to add to this channel")
+async def adduser(interaction: discord.Interaction, user: discord.Member):
+    guild = guild_only(interaction)
+    channel = interaction.channel
+
+    try:
+        await channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True)
+    except discord.Forbidden:
+        await interaction.response.send_message("⚠️ I don't have permission to edit this channel's permissions.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"{CHECK} Added {user.mention} to {channel.mention}.", ephemeral=True)
+
+
+@bot.tree.command(name="removeuser", description="Remove a user from the channel you're in")
+@app_commands.checks.has_permissions(manage_channels=True)
+@app_commands.describe(user="User to remove from this channel")
+async def removeuser(interaction: discord.Interaction, user: discord.Member):
+    guild = guild_only(interaction)
+    channel = interaction.channel
+
+    try:
+        await channel.set_permissions(user, overwrite=None)
+    except discord.Forbidden:
+        await interaction.response.send_message("⚠️ I don't have permission to edit this channel's permissions.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"{CHECK} Removed {user.mention} from {channel.mention}.", ephemeral=True)
 
 
 # ———————————————––
