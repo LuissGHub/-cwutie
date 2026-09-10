@@ -44,9 +44,10 @@ CHECK = "<a:0000:1488556886918824068>"
 AUTOREACT_DELAY_SECONDS = 2
 STICKY_DELAY_SECONDS = 2
 
-# How long to wait after a ticket channel is created before reading the
-# audit log for its creation event. The entry can take a moment to appear,
-# so reading immediately can miss it entirely.
+# How long to wait after a ticket channel is created before reading it to
+# figure out who opened it. The ticket bot's opening message (and/or the
+# audit log entry) can take a moment to appear, so reading immediately can
+# miss it entirely.
 TICKET_OWNER_DETECT_DELAY_SECONDS = 3
 
 # Staff who automatically get individual view access to EVERY ticket, no
@@ -618,45 +619,29 @@ async def add_waitlist_entry_for_channel(bot, guild_id: int, channel_id: int, us
     return True
 
 
-TICKET_AUDIT_LOG_ID_RE = re.compile(r'<@!?(\d{15,20})>|\((\d{15,20})\)|\b(\d{15,20})\b')
-
-
-async def detect_ticket_opener_from_audit_log(channel: discord.TextChannel) -> discord.Member | None:
-    """Works out who actually opened a ticket by reading the audit log entry
-    for the channel's creation. Ticket bots create the channel through their
-    own bot account, so Discord's audit log always lists the bot itself as
-    the technical creator — but most ticket bots (tickets.bot included) stamp
-    the *opener's* name/ID into that entry's reason text (e.g. "Ticket opened
-    by romi (123456789012345678)"), since that's the only way to record who
-    actually triggered it. This reads that reason directly, so it correctly
+async def detect_ticket_opener_from_ping(channel: discord.TextChannel, ignore_ids: set[int]) -> discord.Member | None:
+    """Works out who actually opened a ticket by reading the ticket bot's own
+    opening message in the new channel. tickets.bot (and most ticket bots)
+    posts an opening message that @mentions the person who opened the ticket
+    (e.g. "Thanks for creating a ticket, {user}! Support will be with you
+    shortly."), since that's how it lets the customer know their ticket was
+    received. Reading that mention directly is a hard fact straight from the
+    ticket bot itself — simpler and more reliable than parsing audit log
+    reason text or guessing from permission overwrites, and it correctly
     identifies the real opener even when it's someone who'd normally be
-    treated as staff (e.g. the server owner opening their own ticket) — no
-    ignore-list guessing required. Requires the bot to have the 'View Audit
-    Log' permission."""
+    treated as staff (e.g. the server owner opening their own ticket)."""
     try:
-        async for entry in channel.guild.audit_logs(limit=10, action=discord.AuditLogAction.channel_create):
-            if not entry.target or entry.target.id != channel.id:
-                continue
-            if entry.reason:
-                m = TICKET_AUDIT_LOG_ID_RE.search(entry.reason)
-                if m:
-                    uid = next(g for g in m.groups() if g)
-                    member = channel.guild.get_member(int(uid))
-                    if member:
-                        return member
-            # No usable ID in the reason text — if the entry's executor is an
-            # actual member rather than the ticket bot's own account, that's
-            # our answer (some ticket bots create the channel as a direct
-            # action on behalf of the member instead of stamping the reason).
-            if entry.user and not entry.user.bot:
-                member = channel.guild.get_member(entry.user.id)
+        async for msg in channel.history(limit=10, oldest_first=True):
+            for user in msg.mentions:
+                if user.bot or user.id in ignore_ids:
+                    continue
+                member = channel.guild.get_member(user.id)
                 if member:
                     return member
-            break
     except discord.Forbidden:
-        print(f"[DEBUG] Missing 'View Audit Log' permission — can't read ticket-open audit log for {channel.id}")
+        print(f"[DEBUG] Missing permission to read message history for ticket channel {channel.id}")
     except Exception as e:
-        print(f"[DEBUG] Failed to read audit log for ticket channel {channel.id}: {e}")
+        print(f"[DEBUG] Failed to read opening messages for ticket channel {channel.id}: {e}")
     return None
 
 
@@ -1097,10 +1082,11 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     and matches the configured name prefix, add it to the waitlist automatically.
 
     Also tries to work out *who* the ticket belongs to, in two steps:
-      1. Read the audit log entry for this channel's creation, which most
-         ticket bots (tickets.bot included) stamp with the actual opener's
-         name/ID — a hard fact from Discord rather than a guess, and correct
-         even when the opener is normally treated as staff.
+      1. Read the ticket bot's own opening message in the channel — it @mentions
+         the person who opened the ticket (e.g. "Thanks for creating a ticket,
+         {user}!"), so this is a hard fact straight from the ticket bot itself,
+         not a guess. Correct even when the opener is normally treated as staff
+         (e.g. the server owner opening their own ticket).
       2. Fall back to the channel's own permission overwrites: a ticket bot
          typically grants view access to the customer specifically (as a
          member overwrite, not a role), so if exactly one non-bot, non-staff
@@ -1129,25 +1115,26 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
         print(f"[DEBUG] Skipping #{channel.name}: name doesn't start with configured prefix '{settings['ticket_name_prefix']}'")
         return
 
+    ignore_ids = ALWAYS_IGNORE_TICKET_USER_IDS | {int(u) for u in (settings["ticket_ignore_user_ids"] or "").split(",") if u.strip()}
+
     owner_id = None
     owner_member = None
 
-    # Step 1: give the audit log a moment to populate, then read who actually
-    # opened the ticket straight from it. This works even for someone who'd
+    # Step 1: give the ticket bot's opening message a moment to post, then read
+    # who it @mentions as the ticket opener. This works even for someone who'd
     # normally be treated as staff (e.g. the server owner opening their own
-    # ticket), since it's a fact from Discord rather than a guess.
+    # ticket), since it's a fact straight from the ticket bot rather than a guess.
     await asyncio.sleep(TICKET_OWNER_DETECT_DELAY_SECONDS)
-    owner_member = await detect_ticket_opener_from_audit_log(channel)
+    owner_member = await detect_ticket_opener_from_ping(channel, ignore_ids)
     if owner_member:
         owner_id = owner_member.id
-        print(f"[DEBUG] Ticket channel {channel.id}: owner detected from audit log ({owner_member.id})")
+        print(f"[DEBUG] Ticket channel {channel.id}: owner detected from opening message ping ({owner_member.id})")
     else:
         # Step 2: fall back to guessing from permission overwrites. This
         # method can't tell staff apart from the customer any other way, so
         # it still relies on the ignore list to filter out staff who get
         # individual access on every ticket.
         try:
-            ignore_ids = ALWAYS_IGNORE_TICKET_USER_IDS | {int(u) for u in (settings["ticket_ignore_user_ids"] or "").split(",") if u.strip()}
             member_overwrites = [
                 member for member, perms in channel.overwrites.items()
                 if isinstance(member, discord.Member) and perms.view_channel and not member.bot and member.id not in ignore_ids
@@ -1353,8 +1340,8 @@ async def on_message(message: discord.Message):
     # Matching, in order:
     #   1. Exact match — any waitlist entry that's been *linked* to this user
     #      (via /waitlist_add's user option, /waitlist_user_add, or
-    #      auto-detected at ticket creation from the channel's permission
-    #      overwrites) is removed directly. No guessing involved.
+    #      auto-detected at ticket creation from the ticket bot's opening
+    #      ping) is removed directly. No guessing involved.
     #   2. Fallback for older/unlinked entries — we don't have a stored link
     #      from "person" to "their ticket channel" for those, so we match by
     #      access instead: a ticket bot typically only grants the customer
