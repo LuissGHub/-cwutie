@@ -44,11 +44,10 @@ CHECK = "<a:0000:1488556886918824068>"
 AUTOREACT_DELAY_SECONDS = 2
 STICKY_DELAY_SECONDS = 2
 
-# How long to wait after a ticket channel is created before reading its
-# opening message to look for a customer ping. Ticket bots send that message
-# a moment after the channel itself exists, so reading immediately can miss
-# it entirely.
-TICKET_OWNER_PING_DELAY_SECONDS = 3
+# How long to wait after a ticket channel is created before reading the
+# audit log for its creation event. The entry can take a moment to appear,
+# so reading immediately can miss it entirely.
+TICKET_OWNER_DETECT_DELAY_SECONDS = 3
 
 # Staff who automatically get individual view access to EVERY ticket, no
 # matter who opens it (e.g. the owner). These are always excluded when the
@@ -619,23 +618,45 @@ async def add_waitlist_entry_for_channel(bot, guild_id: int, channel_id: int, us
     return True
 
 
-async def detect_ticket_owner_from_ping(channel: discord.TextChannel, ignore_ids: set[int]) -> discord.Member | None:
-    """Most ticket bots (tickets.bot included) @ the customer directly in the
-    opening embed/message — e.g. '@ticket perm @staff @romi'. That's a much
-    more reliable signal than guessing ownership from permission overwrites,
-    since it's just reading who got pinged instead of inferring it. Looks at
-    the first few messages in the channel (posted by a bot, since that's the
-    ticket tool itself) and returns the single non-staff, non-ignored user
-    mentioned there, if there's exactly one candidate."""
+TICKET_AUDIT_LOG_ID_RE = re.compile(r'<@!?(\d{15,20})>|\((\d{15,20})\)|\b(\d{15,20})\b')
+
+
+async def detect_ticket_opener_from_audit_log(channel: discord.TextChannel) -> discord.Member | None:
+    """Works out who actually opened a ticket by reading the audit log entry
+    for the channel's creation. Ticket bots create the channel through their
+    own bot account, so Discord's audit log always lists the bot itself as
+    the technical creator — but most ticket bots (tickets.bot included) stamp
+    the *opener's* name/ID into that entry's reason text (e.g. "Ticket opened
+    by romi (123456789012345678)"), since that's the only way to record who
+    actually triggered it. This reads that reason directly, so it correctly
+    identifies the real opener even when it's someone who'd normally be
+    treated as staff (e.g. the server owner opening their own ticket) — no
+    ignore-list guessing required. Requires the bot to have the 'View Audit
+    Log' permission."""
     try:
-        async for msg in channel.history(limit=5, oldest_first=True):
-            if not msg.author.bot:
+        async for entry in channel.guild.audit_logs(limit=10, action=discord.AuditLogAction.channel_create):
+            if not entry.target or entry.target.id != channel.id:
                 continue
-            candidates = [m for m in msg.mentions if not m.bot and m.id not in ignore_ids]
-            if len(candidates) == 1:
-                return candidates[0]
+            if entry.reason:
+                m = TICKET_AUDIT_LOG_ID_RE.search(entry.reason)
+                if m:
+                    uid = next(g for g in m.groups() if g)
+                    member = channel.guild.get_member(int(uid))
+                    if member:
+                        return member
+            # No usable ID in the reason text — if the entry's executor is an
+            # actual member rather than the ticket bot's own account, that's
+            # our answer (some ticket bots create the channel as a direct
+            # action on behalf of the member instead of stamping the reason).
+            if entry.user and not entry.user.bot:
+                member = channel.guild.get_member(entry.user.id)
+                if member:
+                    return member
+            break
+    except discord.Forbidden:
+        print(f"[DEBUG] Missing 'View Audit Log' permission — can't read ticket-open audit log for {channel.id}")
     except Exception as e:
-        print(f"[DEBUG] Failed to read ticket-open message for owner ping in {channel.id}: {e}")
+        print(f"[DEBUG] Failed to read audit log for ticket channel {channel.id}: {e}")
     return None
 
 
@@ -1076,14 +1097,15 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     and matches the configured name prefix, add it to the waitlist automatically.
 
     Also tries to work out *who* the ticket belongs to, in two steps:
-      1. Read the ticket bot's own opening message for a direct ping — most
-         ticket bots @ the customer by name right in the welcome embed, which
-         is a hard fact instead of a guess.
+      1. Read the audit log entry for this channel's creation, which most
+         ticket bots (tickets.bot included) stamp with the actual opener's
+         name/ID — a hard fact from Discord rather than a guess, and correct
+         even when the opener is normally treated as staff.
       2. Fall back to the channel's own permission overwrites: a ticket bot
          typically grants view access to the customer specifically (as a
-         member overwrite, not a role), so if exactly one non-bot member has
-         an explicit view overwrite on the new channel, that's almost
-         certainly the customer.
+         member overwrite, not a role), so if exactly one non-bot, non-staff
+         member has an explicit view overwrite on the new channel, that's
+         almost certainly the customer.
     Storing that up front means vouch auto-removal (see on_message) can match
     this ticket to its customer exactly instead of guessing later — this is
     what makes removal reliable across every kind of ticket, not just the
@@ -1109,18 +1131,23 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
 
     owner_id = None
     owner_member = None
-    ignore_ids = ALWAYS_IGNORE_TICKET_USER_IDS | {int(u) for u in (settings["ticket_ignore_user_ids"] or "").split(",") if u.strip()}
 
-    # Step 1: give the ticket bot a moment to post its opening message, then
-    # try to read the customer straight off its ping.
-    await asyncio.sleep(TICKET_OWNER_PING_DELAY_SECONDS)
-    owner_member = await detect_ticket_owner_from_ping(channel, ignore_ids)
+    # Step 1: give the audit log a moment to populate, then read who actually
+    # opened the ticket straight from it. This works even for someone who'd
+    # normally be treated as staff (e.g. the server owner opening their own
+    # ticket), since it's a fact from Discord rather than a guess.
+    await asyncio.sleep(TICKET_OWNER_DETECT_DELAY_SECONDS)
+    owner_member = await detect_ticket_opener_from_audit_log(channel)
     if owner_member:
         owner_id = owner_member.id
-        print(f"[DEBUG] Ticket channel {channel.id}: owner detected from opening-message ping ({owner_member.id})")
+        print(f"[DEBUG] Ticket channel {channel.id}: owner detected from audit log ({owner_member.id})")
     else:
-        # Step 2: fall back to guessing from permission overwrites.
+        # Step 2: fall back to guessing from permission overwrites. This
+        # method can't tell staff apart from the customer any other way, so
+        # it still relies on the ignore list to filter out staff who get
+        # individual access on every ticket.
         try:
+            ignore_ids = ALWAYS_IGNORE_TICKET_USER_IDS | {int(u) for u in (settings["ticket_ignore_user_ids"] or "").split(",") if u.strip()}
             member_overwrites = [
                 member for member, perms in channel.overwrites.items()
                 if isinstance(member, discord.Member) and perms.view_channel and not member.bot and member.id not in ignore_ids
