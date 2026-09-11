@@ -2838,16 +2838,21 @@ async def vouch_clear(interaction: discord.Interaction):
 # Commands — Fast Pass Reminders
 # ———————————————––
 
+# Accent emoji for fast pass reminders. CHECK (defined above) is reused as the
+# leading emoji; this is the trailing one.
+FASTPASS_PAW_EMOJI = "<a:1white_paws:1517064987678343198>"
+
+
 async def send_fastpass_reminder(interaction: discord.Interaction, hours: int, user: discord.Member | None, note: str | None):
     guild_only(interaction)
-    urgency = "⏰⚠️" if hours <= 24 else "⏰"
-    theme = "peach" if hours <= 24 else "pink"
-    target = user.mention if user else "Heads up"
-    description = f"{urgency} **{hours} Hour Fast Pass Reminder**\n\n{target}, your fast pass slot expires in **{hours} hours**! Please make sure everything's squared away before then."
+    target = user.mention if user else "heads up"
+    # Sent as plain message content (not an embed) so an @mention here
+    # actually pings/notifies the customer — Discord doesn't fire
+    # notifications for mentions that live inside an embed.
+    message = f"*{CHECK} {hours} hr Fast Pass reminder — {target}, you have **{hours} hours** left!* {FASTPASS_PAW_EMOJI}"
     if note:
-        description += f"\n\n{note}"
-    embed = build_embed(description=description, theme=theme)
-    await interaction.response.send_message(embed=embed)
+        message += f"\n{note}"
+    await interaction.response.send_message(message)
 
 
 @bot.tree.command(name="72", description="Send a 72-hour fast pass reminder")
