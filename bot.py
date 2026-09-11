@@ -2835,6 +2835,34 @@ async def vouch_clear(interaction: discord.Interaction):
 
 
 # ———————————————––
+# Commands — Fast Pass Reminders
+# ———————————————––
+
+async def send_fastpass_reminder(interaction: discord.Interaction, hours: int, user: discord.Member | None, note: str | None):
+    guild_only(interaction)
+    urgency = "⏰⚠️" if hours <= 24 else "⏰"
+    theme = "peach" if hours <= 24 else "pink"
+    target = user.mention if user else "Heads up"
+    description = f"{urgency} **{hours} Hour Fast Pass Reminder**\n\n{target}, your fast pass slot expires in **{hours} hours**! Please make sure everything's squared away before then."
+    if note:
+        description += f"\n\n{note}"
+    embed = build_embed(description=description, theme=theme)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="72", description="Send a 72-hour fast pass reminder")
+@app_commands.describe(user="Customer to remind (optional)", note="Optional extra note to include")
+async def fastpass_72(interaction: discord.Interaction, user: discord.Member | None = None, note: str | None = None):
+    await send_fastpass_reminder(interaction, 72, user, note)
+
+
+@bot.tree.command(name="24", description="Send a 24-hour fast pass reminder")
+@app_commands.describe(user="Customer to remind (optional)", note="Optional extra note to include")
+async def fastpass_24(interaction: discord.Interaction, user: discord.Member | None = None, note: str | None = None):
+    await send_fastpass_reminder(interaction, 24, user, note)
+
+
+# ———————————————––
 # Commands — Role Management
 # ———————————————––
 
