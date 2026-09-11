@@ -81,6 +81,7 @@ SETTINGS_COLUMNS = [
     "botmention_message",
     "ticket_category_id", "ticket_name_prefix", "ticket_ignore_user_ids",
     "showcase_channel_id", "showcase_text", "showcase_theme", "showcase_image2_url", "showcase_image3_url",
+    "fastpass_role_ids",
 ]
 
 # Columns for the image_responders table that were added after the table's
@@ -2843,37 +2844,73 @@ async def vouch_clear(interaction: discord.Interaction):
 FASTPASS_PAW_EMOJI = "<a:1white_paws:1517064987678343198>"
 
 
-async def send_fastpass_reminder(interaction: discord.Interaction, hours: int, user: discord.Member | None, roles: str | None):
+@bot.tree.command(name="fastpass_roles_setup", description="Set the role(s) that /72 and /24 ping by default")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(roles="Role(s) to ping, space-separated (e.g. @Waitlisted @VIP)")
+async def fastpass_roles_setup(interaction: discord.Interaction, roles: str):
+    guild = guild_only(interaction)
+    found, invalid = parse_role_list(guild, roles)
+    if not found:
+        await interaction.response.send_message("❌ I couldn't find any valid roles in that list. Mention them like @Waitlisted @VIP.", ephemeral=True)
+        return
+
+    role_ids = [str(r.id) for r in found]
+    upsert_settings(guild.id, fastpass_role_ids=",".join(role_ids))
+    display = " ".join(r.mention for r in found)
+    msg = f"{CHECK} `/72` and `/24` will now ping {display} by default."
+    if invalid:
+        msg += f"\n⚠️ Skipped (not found): {', '.join(invalid)}"
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
+@bot.tree.command(name="fastpass_roles_clear", description="Stop /72 and /24 from pinging a default role")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def fastpass_roles_clear(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, fastpass_role_ids="")
+    await interaction.response.send_message(f"{CHECK} Default fast pass ping role(s) cleared.", ephemeral=True)
+
+
+async def send_fastpass_reminder(interaction: discord.Interaction, hours: int, roles: str | None):
     guild = guild_only(interaction)
 
     mentions: list[str] = []
-    if user:
-        mentions.append(user.mention)
     if roles:
         found, invalid = parse_role_list(guild, roles)
         if invalid:
             await interaction.response.send_message(f"❌ Couldn't find role(s): {', '.join(invalid)}", ephemeral=True)
             return
         mentions.extend(r.mention for r in found)
+    else:
+        # No override given for this message — fall back to the roles saved
+        # via /fastpass_roles_setup, if any.
+        settings = get_settings(guild.id)
+        if settings and settings["fastpass_role_ids"]:
+            for rid in settings["fastpass_role_ids"].split(","):
+                if not rid.strip():
+                    continue
+                role = guild.get_role(int(rid))
+                if role:
+                    mentions.append(role.mention)
 
     target = " ".join(mentions) if mentions else "heads up"
-    # Sent as plain message content (not an embed) so an @mention/role ping
-    # here actually notifies — Discord doesn't fire notifications for
-    # mentions that live inside an embed.
+    # Sent as plain message content (not an embed) so a role ping here
+    # actually notifies — Discord doesn't fire notifications for mentions
+    # that live inside an embed.
     message = f"*{CHECK} {hours} hr Fast Pass reminder — {target}, you have **{hours} hours** left!* {FASTPASS_PAW_EMOJI}"
     await interaction.response.send_message(message)
 
 
 @bot.tree.command(name="72", description="Send a 72-hour fast pass reminder")
-@app_commands.describe(user="Customer to remind (optional)", roles="Role(s) to ping instead of/alongside the user, space-separated (optional)")
-async def fastpass_72(interaction: discord.Interaction, user: discord.Member | None = None, roles: str | None = None):
-    await send_fastpass_reminder(interaction, 72, user, roles)
+@app_commands.describe(roles="Role(s) to ping, space-separated (optional — overrides the saved default for this message)")
+async def fastpass_72(interaction: discord.Interaction, roles: str | None = None):
+    await send_fastpass_reminder(interaction, 72, roles)
 
 
 @bot.tree.command(name="24", description="Send a 24-hour fast pass reminder")
-@app_commands.describe(user="Customer to remind (optional)", roles="Role(s) to ping instead of/alongside the user, space-separated (optional)")
-async def fastpass_24(interaction: discord.Interaction, user: discord.Member | None = None, roles: str | None = None):
-    await send_fastpass_reminder(interaction, 24, user, roles)
+@app_commands.describe(roles="Role(s) to ping, space-separated (optional — overrides the saved default for this message)")
+async def fastpass_24(interaction: discord.Interaction, roles: str | None = None):
+    await send_fastpass_reminder(interaction, 24, roles)
 
 
 # ———————————————––
