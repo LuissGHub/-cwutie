@@ -8,11 +8,11 @@ import io
 import aiohttp
 import re
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -261,6 +261,20 @@ def init_db() -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             UNIQUE(guild_id, name)
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fastpass_timers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            channel_id INTEGER NOT NULL,
+            total_hours INTEGER NOT NULL,
+            end_time TEXT NOT NULL,
+            warned INTEGER DEFAULT 0,
+            done INTEGER DEFAULT 0
         )
         """
     )
@@ -1044,6 +1058,8 @@ class WaitlistMovePositionView(discord.ui.View):
 async def on_ready():
     init_db()
     bot.add_view(VerifyView())
+    if not check_fastpass_timers.is_running():
+        check_fastpass_timers.start()
     print(f"Bot user: {bot.user}")
     synced = await bot.tree.sync()
     print(f"Synced {len(synced)} global command(s)")
@@ -2836,15 +2852,21 @@ async def vouch_clear(interaction: discord.Interaction):
 
 
 # ———————————————––
-# Commands — Fast Pass Reminders
+# Commands — Fast Pass Timers
 # ———————————————––
 
-# Accent emoji for fast pass reminders. CHECK (defined above) is reused as the
-# leading emoji; this is the trailing one.
+# Emoji used in fast pass messages. CHECK (defined above) doubles as the
+# leading emoji throughout.
 FASTPASS_PAW_EMOJI = "<a:1white_paws:1517064987678343198>"
+FASTPASS_WARNING_EMOJI = "<:000:1495625788547137769>"
+FASTPASS_DONE_EMOJI = "<:001_DNS_ggpawi:1521723847261294723>"
+
+# How often the background loop checks for timers due for their 2-hour
+# warning or their expiry message.
+FASTPASS_CHECK_INTERVAL_SECONDS = 60
 
 
-@bot.tree.command(name="fastpass_roles_setup", description="Set the role(s) that /72 and /24 ping by default")
+@bot.tree.command(name="fastpass_roles_setup", description="Set the role(s) that fast pass timers ping at the 2-hour and done reminders")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(roles="Role(s) to ping, space-separated (e.g. @Waitlisted @VIP)")
 async def fastpass_roles_setup(interaction: discord.Interaction, roles: str):
@@ -2857,13 +2879,13 @@ async def fastpass_roles_setup(interaction: discord.Interaction, roles: str):
     role_ids = [str(r.id) for r in found]
     upsert_settings(guild.id, fastpass_role_ids=",".join(role_ids))
     display = " ".join(r.mention for r in found)
-    msg = f"{CHECK} `/72` and `/24` will now ping {display} by default."
+    msg = f"{CHECK} Fast pass timers will now ping {display} at the 2-hour and done reminders."
     if invalid:
         msg += f"\n⚠️ Skipped (not found): {', '.join(invalid)}"
     await interaction.response.send_message(msg, ephemeral=True)
 
 
-@bot.tree.command(name="fastpass_roles_clear", description="Stop /72 and /24 from pinging a default role")
+@bot.tree.command(name="fastpass_roles_clear", description="Stop fast pass timers from pinging a default role")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def fastpass_roles_clear(interaction: discord.Interaction):
     guild = guild_only(interaction)
@@ -2871,46 +2893,112 @@ async def fastpass_roles_clear(interaction: discord.Interaction):
     await interaction.response.send_message(f"{CHECK} Default fast pass ping role(s) cleared.", ephemeral=True)
 
 
-async def send_fastpass_reminder(interaction: discord.Interaction, hours: int, roles: str | None):
-    guild = guild_only(interaction)
-
+def _fastpass_ping_target(guild: discord.Guild) -> str:
+    """Space-separated mentions for whatever role(s) were saved via
+    /fastpass_roles_setup, or a plain fallback if none are configured."""
+    settings = get_settings(guild.id)
     mentions: list[str] = []
-    if roles:
-        found, invalid = parse_role_list(guild, roles)
-        if invalid:
-            await interaction.response.send_message(f"❌ Couldn't find role(s): {', '.join(invalid)}", ephemeral=True)
-            return
-        mentions.extend(r.mention for r in found)
-    else:
-        # No override given for this message — fall back to the roles saved
-        # via /fastpass_roles_setup, if any.
-        settings = get_settings(guild.id)
-        if settings and settings["fastpass_role_ids"]:
-            for rid in settings["fastpass_role_ids"].split(","):
-                if not rid.strip():
-                    continue
-                role = guild.get_role(int(rid))
-                if role:
-                    mentions.append(role.mention)
+    if settings and settings["fastpass_role_ids"]:
+        for rid in settings["fastpass_role_ids"].split(","):
+            if not rid.strip():
+                continue
+            role = guild.get_role(int(rid))
+            if role:
+                mentions.append(role.mention)
+    return " ".join(mentions) if mentions else "heads up"
 
-    target = " ".join(mentions) if mentions else "heads up"
-    # Sent as plain message content (not an embed) so a role ping here
-    # actually notifies — Discord doesn't fire notifications for mentions
-    # that live inside an embed.
-    message = f"*{CHECK} {hours} hr Fast Pass reminder — {target}, you have **{hours} hours** left!* {FASTPASS_PAW_EMOJI}"
+
+async def start_fastpass_timer(interaction: discord.Interaction, hours: int):
+    guild = guild_only(interaction)
+    now = datetime.now(timezone.utc)
+    end_time = now + timedelta(hours=hours)
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO fastpass_timers (guild_id, channel_id, total_hours, end_time, warned, done) VALUES (?, ?, ?, ?, 0, 0)",
+        (guild.id, interaction.channel_id, hours, end_time.isoformat()),
+    )
+    timer_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    # No role ping here on purpose — starting the timer shouldn't notify
+    # anyone. The pings happen automatically at the 2-hour-left mark and
+    # when the timer's up (see check_fastpass_timers below).
+    message = f"{CHECK} {hours} hrs FP timer started — will remind 2 hours before, and once again when the {hours} hours are up {FASTPASS_PAW_EMOJI}"
     await interaction.response.send_message(message)
+    print(f"[DEBUG] Started fastpass timer #{timer_id} in guild {guild.id}, channel {interaction.channel_id}, {hours}h, ends {end_time.isoformat()}")
 
 
-@bot.tree.command(name="72", description="Send a 72-hour fast pass reminder")
-@app_commands.describe(roles="Role(s) to ping, space-separated (optional — overrides the saved default for this message)")
-async def fastpass_72(interaction: discord.Interaction, roles: str | None = None):
-    await send_fastpass_reminder(interaction, 72, roles)
+@bot.tree.command(name="72", description="Start a 72-hour fast pass timer (pings at 2 hours left, and when it's done)")
+async def fastpass_72(interaction: discord.Interaction):
+    await start_fastpass_timer(interaction, 72)
 
 
-@bot.tree.command(name="24", description="Send a 24-hour fast pass reminder")
-@app_commands.describe(roles="Role(s) to ping, space-separated (optional — overrides the saved default for this message)")
-async def fastpass_24(interaction: discord.Interaction, roles: str | None = None):
-    await send_fastpass_reminder(interaction, 24, roles)
+@bot.tree.command(name="24", description="Start a 24-hour fast pass timer (pings at 2 hours left, and when it's done)")
+async def fastpass_24(interaction: discord.Interaction):
+    await start_fastpass_timer(interaction, 24)
+
+
+@tasks.loop(seconds=FASTPASS_CHECK_INTERVAL_SECONDS)
+async def check_fastpass_timers():
+    """Polls for fast-pass timers that need their 2-hour warning or expiry
+    message sent, and fires them in the channel the timer was started in.
+    Runs on a plain interval (rather than a per-timer sleep task) so timers
+    survive a bot restart without needing to be rescheduled — whatever's due
+    next time this loop runs just gets sent then."""
+    now = datetime.now(timezone.utc)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM fastpass_timers WHERE done = 0")
+    rows = cur.fetchall()
+    conn.close()
+
+    for row in rows:
+        try:
+            end_time = datetime.fromisoformat(row["end_time"])
+        except Exception as e:
+            print(f"[DEBUG] Bad end_time on fastpass timer #{row['id']}: {e}")
+            continue
+
+        guild = bot.get_guild(row["guild_id"])
+        if not guild:
+            continue
+        channel = guild.get_channel(row["channel_id"])
+        if not channel:
+            continue
+
+        if not row["warned"] and now >= end_time - timedelta(hours=2):
+            target = _fastpass_ping_target(guild)
+            message = f"FP timer — {CHECK} 2 hours left! {target} {FASTPASS_WARNING_EMOJI}"
+            try:
+                await channel.send(message)
+            except Exception as e:
+                print(f"[DEBUG] Failed to send fastpass 2hr warning for timer #{row['id']}: {e}")
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("UPDATE fastpass_timers SET warned = 1 WHERE id = ?", (row["id"],))
+            conn.commit()
+            conn.close()
+
+        if now >= end_time:
+            target = _fastpass_ping_target(guild)
+            message = f"{CHECK} FP timer is up! {target} {FASTPASS_DONE_EMOJI}"
+            try:
+                await channel.send(message)
+            except Exception as e:
+                print(f"[DEBUG] Failed to send fastpass expiry message for timer #{row['id']}: {e}")
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("UPDATE fastpass_timers SET done = 1, warned = 1 WHERE id = ?", (row["id"],))
+            conn.commit()
+            conn.close()
+
+
+@check_fastpass_timers.before_loop
+async def before_check_fastpass_timers():
+    await bot.wait_until_ready()
 
 
 # ———————————————––
