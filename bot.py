@@ -533,6 +533,33 @@ def build_plain_image_content(caption: str | None, image_url: str) -> str:
     return f"{caption}\n{image_url}" if caption else image_url
 
 
+PLAIN_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+
+
+async def fetch_image_file(image_url: str) -> discord.File | None:
+    """Downloads the image so it can be re-uploaded as a real attachment
+    (shows just the picture — no link text and no 'image.png' chip). Returns
+    None if the download fails or the file is too big, in which case callers
+    fall back to posting the plain link."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    print(f"[DEBUG] Image download failed ({resp.status}) for {image_url}")
+                    return None
+                data = await resp.read()
+        if len(data) > PLAIN_IMAGE_MAX_BYTES:
+            print(f"[DEBUG] Image too large to re-upload ({len(data)} bytes): {image_url}")
+            return None
+        name = image_url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1] or "image.png"
+        if "." not in name:
+            name += ".png"
+        return discord.File(io.BytesIO(data), filename=name)
+    except Exception as e:
+        print(f"[DEBUG] Failed to download image {image_url}: {e!r}")
+        return None
+
+
 # ———————————————––
 # Waitlist Helpers
 # ———————————————––
@@ -1451,8 +1478,14 @@ async def on_message(message: discord.Message):
         if check_trigger(content_lower, img["trigger"], img["match_type"] or "exact"):
             try:
                 if img["as_embed"] == 0:
-                    # Plain (non-embed) mode: caption + raw link, Discord previews it inline.
-                    await message.channel.send(build_plain_image_content(img["caption"], img["image_url"]))
+                    # Plain (non-embed) mode: re-upload the image as an attachment so
+                    # only the picture (and caption, if any) shows. Falls back to the
+                    # raw link if the download fails.
+                    file = await fetch_image_file(img["image_url"])
+                    if file:
+                        await message.channel.send(content=(img["caption"] or None), file=file)
+                    else:
+                        await message.channel.send(build_plain_image_content(img["caption"], img["image_url"]))
                 else:
                     embed = build_embed(
                         title=None,
@@ -2557,7 +2590,12 @@ async def imageresponder_add(interaction: discord.Interaction, trigger: str, ima
             preview = build_embed(title=None, description=caption or None, theme=color or "pink", image=image_url, thumbnail=thumbnail_url, footer=footer or None, footer_icon=footer_icon_url)
             await interaction.response.send_message(header, embed=preview, ephemeral=True)
         else:
-            await interaction.response.send_message(f"{header}\n{build_plain_image_content(caption, image_url)}", ephemeral=True)
+            await interaction.response.defer(ephemeral=True)
+            file = await fetch_image_file(image_url)
+            if file:
+                await interaction.followup.send(f"{header}\n{caption or ''}".strip(), file=file, ephemeral=True)
+            else:
+                await interaction.followup.send(f"{header}\n{build_plain_image_content(caption, image_url)}", ephemeral=True)
     except sqlite3.IntegrityError:
         await interaction.response.send_message(f"❌ Trigger `{trigger}` already exists.", ephemeral=True)
     finally:
@@ -2623,7 +2661,12 @@ async def imageresponder_edit(interaction: discord.Interaction, trigger: str, im
         preview = build_embed(title=None, description=final_caption or None, theme=final_color, image=final_image, thumbnail=final_thumbnail, footer=final_footer, footer_icon=final_footer_icon)
         await interaction.response.send_message(header, embed=preview, ephemeral=True)
     else:
-        await interaction.response.send_message(f"{header}\n{build_plain_image_content(final_caption, final_image)}", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        file = await fetch_image_file(final_image)
+        if file:
+            await interaction.followup.send(f"{header}\n{final_caption or ''}".strip(), file=file, ephemeral=True)
+        else:
+            await interaction.followup.send(f"{header}\n{build_plain_image_content(final_caption, final_image)}", ephemeral=True)
 
 
 @bot.tree.command(name="imageresponder_remove", description="Delete an image responder")
