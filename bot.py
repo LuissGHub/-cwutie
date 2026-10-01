@@ -95,6 +95,9 @@ IMAGE_RESPONDER_COLUMNS = [
     # 1 = post as an embed (original behavior), 0 = post as a plain message
     # (caption + raw image link, no embed box). Existing rows get 1.
     ("as_embed", "INTEGER DEFAULT 1"),
+    # Optional second image, posted as its own follow-up embed right after
+    # the first (same pattern as welcome/boost's banner2_url). Embed mode only.
+    ("image_url2", "TEXT"),
 ]
 
 # ———————————————––
@@ -241,12 +244,13 @@ def init_db() -> None:
             footer TEXT,
             footer_icon TEXT,
             as_embed INTEGER DEFAULT 1,
+            image_url2 TEXT,
             UNIQUE(guild_id, trigger)
         )
         """
     )
 
-    # Carries "color" / "thumbnail_url" / "footer" / "footer_icon" / "as_embed"
+    # Carries "color" / "thumbnail_url" / "footer" / "footer_icon" / "as_embed" / "image_url2"
     # onto any image_responders table that was created before those columns
     # existed (CREATE TABLE IF NOT EXISTS above only applies to brand-new tables).
     for col, coldef in IMAGE_RESPONDER_COLUMNS:
@@ -1470,7 +1474,7 @@ async def on_message(message: discord.Message):
     # Image responders
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT trigger, image_url, caption, match_type, color, thumbnail_url, footer, footer_icon, as_embed FROM image_responders WHERE guild_id = ?", (message.guild.id,))
+    cur.execute("SELECT trigger, image_url, image_url2, caption, match_type, color, thumbnail_url, footer, footer_icon, as_embed FROM image_responders WHERE guild_id = ?", (message.guild.id,))
     all_imgs = cur.fetchall()
     conn.close()
 
@@ -1480,7 +1484,8 @@ async def on_message(message: discord.Message):
                 if img["as_embed"] == 0:
                     # Plain (non-embed) mode: re-upload the image as an attachment so
                     # only the picture (and caption, if any) shows. Falls back to the
-                    # raw link if the download fails.
+                    # raw link if the download fails. (No 2nd-image support in plain
+                    # mode — set as_embed to use that.)
                     file = await fetch_image_file(img["image_url"])
                     if file:
                         await message.channel.send(content=(img["caption"] or None), file=file)
@@ -1497,6 +1502,9 @@ async def on_message(message: discord.Message):
                         footer_icon=img["footer_icon"] or None,
                     )
                     await message.channel.send(embed=embed)
+                    if img["image_url2"]:
+                        embed2 = build_embed(title=None, description=None, theme=img["color"] or "pink", image=img["image_url2"])
+                        await message.channel.send(embed=embed2)
             except Exception as e:
                 print(f"[DEBUG] Failed to send image responder '{img['trigger']}': {e!r}")
             break
@@ -2567,9 +2575,10 @@ async def autoresponder_list(interaction: discord.Interaction):
     thumbnail_url="Small image shown on the side/corner of the embed (embed mode only)",
     footer="Small text shown at the bottom of the embed (embed mode only)",
     footer_icon="Small icon next to the footer text — custom emoji or image URL (embed mode only)",
+    image_url2="Optional 2nd image, posted as its own embed right after the first (embed mode only)",
 )
 @app_commands.choices(match_type=[app_commands.Choice(name="exact", value="exact"), app_commands.Choice(name="anywhere", value="anywhere")])
-async def imageresponder_add(interaction: discord.Interaction, trigger: str, image_url: str, caption: str | None = None, match_type: str = "exact", as_embed: bool = True, color: str = "pink", thumbnail_url: str | None = None, footer: str | None = None, footer_icon: str | None = None):
+async def imageresponder_add(interaction: discord.Interaction, trigger: str, image_url: str, caption: str | None = None, match_type: str = "exact", as_embed: bool = True, color: str = "pink", thumbnail_url: str | None = None, footer: str | None = None, footer_icon: str | None = None, image_url2: str | None = None):
     guild = guild_only(interaction)
     # Strip a leading "." so ".hello" and "hello" are stored the same way —
     # exact matching already adds the dot itself (see check_trigger), so a
@@ -2581,14 +2590,18 @@ async def imageresponder_add(interaction: discord.Interaction, trigger: str, ima
     
     try:
         cur.execute(
-            "INSERT INTO image_responders (guild_id, trigger, image_url, caption, match_type, color, thumbnail_url, footer, footer_icon, as_embed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (guild.id, trigger, image_url, caption, match_type, color or "pink", thumbnail_url, footer, footer_icon_url, 1 if as_embed else 0),
+            "INSERT INTO image_responders (guild_id, trigger, image_url, caption, match_type, color, thumbnail_url, footer, footer_icon, as_embed, image_url2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (guild.id, trigger, image_url, caption, match_type, color or "pink", thumbnail_url, footer, footer_icon_url, 1 if as_embed else 0, image_url2),
         )
         conn.commit()
         header = f"{CHECK} Image responder `{trigger}` created! (match: {match_type}, {'embed' if as_embed else 'plain image'})"
         if as_embed:
             preview = build_embed(title=None, description=caption or None, theme=color or "pink", image=image_url, thumbnail=thumbnail_url, footer=footer or None, footer_icon=footer_icon_url)
-            await interaction.response.send_message(header, embed=preview, ephemeral=True)
+            if image_url2:
+                preview2 = build_embed(title=None, description=None, theme=color or "pink", image=image_url2)
+                await interaction.response.send_message(header, embeds=[preview, preview2], ephemeral=True)
+            else:
+                await interaction.response.send_message(header, embed=preview, ephemeral=True)
         else:
             await interaction.response.defer(ephemeral=True)
             file = await fetch_image_file(image_url)
@@ -2614,9 +2627,10 @@ async def imageresponder_add(interaction: discord.Interaction, trigger: str, ima
     thumbnail_url="New small side image URL ('none' to remove)",
     footer="New footer text ('none' to remove)",
     footer_icon="New footer icon — custom emoji or image URL ('none' to remove)",
+    image_url2="New 2nd image URL, posted as its own embed after the first ('none' to remove, embed mode only)",
 )
 @app_commands.choices(match_type=[app_commands.Choice(name="exact", value="exact"), app_commands.Choice(name="anywhere", value="anywhere")])
-async def imageresponder_edit(interaction: discord.Interaction, trigger: str, image_url: str | None = None, caption: str | None = None, match_type: str | None = None, as_embed: bool | None = None, color: str | None = None, thumbnail_url: str | None = None, footer: str | None = None, footer_icon: str | None = None):
+async def imageresponder_edit(interaction: discord.Interaction, trigger: str, image_url: str | None = None, caption: str | None = None, match_type: str | None = None, as_embed: bool | None = None, color: str | None = None, thumbnail_url: str | None = None, footer: str | None = None, footer_icon: str | None = None, image_url2: str | None = None):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip().lstrip(".")
     conn = get_db()
@@ -2649,9 +2663,13 @@ async def imageresponder_edit(interaction: discord.Interaction, trigger: str, im
         final_footer_icon = row["footer_icon"]
     else:
         final_footer_icon = None if footer_icon.lower() == "none" else resolve_icon_url(footer_icon)
+    if image_url2 is None:
+        final_image_url2 = row["image_url2"]
+    else:
+        final_image_url2 = None if image_url2.lower() == "none" else image_url2
     cur.execute(
-        "UPDATE image_responders SET image_url = ?, caption = ?, match_type = ?, as_embed = ?, color = ?, thumbnail_url = ?, footer = ?, footer_icon = ? WHERE guild_id = ? AND trigger = ?",
-        (final_image, final_caption, final_match, final_as_embed, final_color, final_thumbnail, final_footer, final_footer_icon, guild.id, trigger),
+        "UPDATE image_responders SET image_url = ?, caption = ?, match_type = ?, as_embed = ?, color = ?, thumbnail_url = ?, footer = ?, footer_icon = ?, image_url2 = ? WHERE guild_id = ? AND trigger = ?",
+        (final_image, final_caption, final_match, final_as_embed, final_color, final_thumbnail, final_footer, final_footer_icon, final_image_url2, guild.id, trigger),
     )
     conn.commit()
     conn.close()
@@ -2659,7 +2677,11 @@ async def imageresponder_edit(interaction: discord.Interaction, trigger: str, im
     header = f"{CHECK} Image responder `{trigger}` updated! (match: {final_match}, {'embed' if final_as_embed else 'plain image'})"
     if final_as_embed:
         preview = build_embed(title=None, description=final_caption or None, theme=final_color, image=final_image, thumbnail=final_thumbnail, footer=final_footer, footer_icon=final_footer_icon)
-        await interaction.response.send_message(header, embed=preview, ephemeral=True)
+        if final_image_url2:
+            preview2 = build_embed(title=None, description=None, theme=final_color, image=final_image_url2)
+            await interaction.response.send_message(header, embeds=[preview, preview2], ephemeral=True)
+        else:
+            await interaction.response.send_message(header, embed=preview, ephemeral=True)
     else:
         await interaction.response.defer(ephemeral=True)
         file = await fetch_image_file(final_image)
@@ -2692,7 +2714,7 @@ async def imageresponder_list(interaction: discord.Interaction):
     guild = guild_only(interaction)
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT trigger, image_url, caption, match_type, color, thumbnail_url, footer, as_embed FROM image_responders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
+    cur.execute("SELECT trigger, image_url, image_url2, caption, match_type, color, thumbnail_url, footer, as_embed FROM image_responders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
     rows = cur.fetchall()
     conn.close()
     
@@ -2709,9 +2731,10 @@ async def imageresponder_list(interaction: discord.Interaction):
             thumb_text = f"\nSide image: [link]({row['thumbnail_url']})" if row["thumbnail_url"] else ""
             color_text = f"\nColor: {row['color'] or 'pink'}"
             footer_text = f"\nFooter: {row['footer']}" if row["footer"] else ""
+            image2_text = f"\n2nd image: [link]({row['image_url2']})" if row["image_url2"] else ""
         else:
-            thumb_text = color_text = footer_text = ""
-        embed.add_field(name=f"`{row['trigger']}` — {row['match_type'] or 'exact'}", value=f"[image]({row['image_url']}){caption_text}{mode_text}{color_text}{thumb_text}{footer_text}", inline=False)
+            thumb_text = color_text = footer_text = image2_text = ""
+        embed.add_field(name=f"`{row['trigger']}` — {row['match_type'] or 'exact'}", value=f"[image]({row['image_url']}){caption_text}{mode_text}{color_text}{thumb_text}{footer_text}{image2_text}", inline=False)
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
