@@ -3218,8 +3218,6 @@ ROBUX_EMOJI = "<:001_roblox_DNS:1501267296511856712>"
 
 # key: (label, usd, robux)
 PRICE_ITEMS = {
-    "regular_upload": ("regular upload", 14, 1500),
-    "limited_upload": ("limited upload", 3, 350),
     "simple_necklace": ("simple necklace", 2, 250),
     "locket": ("locket", 5, 600),
     "one_name_regular": ("one name regular", 5, 550),
@@ -3228,29 +3226,48 @@ PRICE_ITEMS = {
     "chain": ("chain", 9, 1000),
 }
 
-CUSTOM_CHARM_PRICE = (2, 250)   # (usd, robux) each
-TEXT_DESIGN_PRICE = (3, 350)    # (usd, robux) each
+# Optional upload choice. Self upload = customer uploads it themselves (free).
+UPLOAD_OPTIONS = {
+    "self_upload": ("self upload (free)", 0, 0),
+    "regular_upload": ("regular upload", 14, 1500),
+    "limited_upload": ("limited upload", 3, 350),
+}
+
+CUSTOM_CHARM_PRICE = (2, 250)   # (usd, robux), flat
+TEXT_DESIGN_PRICE = (3, 350)    # (usd, robux), flat
 
 
-@bot.tree.command(name="price", description="Show the price in $ and Robux for an item plus optional add-ons")
+@bot.tree.command(name="price", description="Show the price in $ and Robux for an item, upload option, and add-ons")
 @app_commands.describe(
-    item="Main item",
-    custom_charms="How many custom charms to add (optional)",
-    text_designs="How many text designs to add (optional)",
+    item="Necklace / main item (optional)",
+    upload="Upload option (optional)",
+    custom_charms="Add custom charms? (optional)",
+    text_designs="Add text designs? (optional)",
 )
-@app_commands.choices(item=[app_commands.Choice(name=v[0], value=k) for k, v in PRICE_ITEMS.items()])
+@app_commands.choices(
+    item=[app_commands.Choice(name=v[0], value=k) for k, v in PRICE_ITEMS.items()],
+    upload=[app_commands.Choice(name=v[0], value=k) for k, v in UPLOAD_OPTIONS.items()],
+)
 async def price_command(
     interaction: discord.Interaction,
-    item: str,
-    custom_charms: app_commands.Range[int, 0, 20] = 0,
-    text_designs: app_commands.Range[int, 0, 20] = 0,
+    item: str | None = None,
+    upload: str | None = None,
+    custom_charms: bool = False,
+    text_designs: bool = False,
 ):
-    label, usd, robux = PRICE_ITEMS[item]
-    rows = [(label, usd, robux)]
+    rows = []
+    if item:
+        rows.append(PRICE_ITEMS[item])
+    if upload:
+        rows.append(UPLOAD_OPTIONS[upload])
     if custom_charms:
-        rows.append((f"custom charms x{custom_charms}", CUSTOM_CHARM_PRICE[0] * custom_charms, CUSTOM_CHARM_PRICE[1] * custom_charms))
+        rows.append(("custom charms", CUSTOM_CHARM_PRICE[0], CUSTOM_CHARM_PRICE[1]))
     if text_designs:
-        rows.append((f"text designs x{text_designs}", TEXT_DESIGN_PRICE[0] * text_designs, TEXT_DESIGN_PRICE[1] * text_designs))
+        rows.append(("text designs", TEXT_DESIGN_PRICE[0], TEXT_DESIGN_PRICE[1]))
+
+    if not rows:
+        await interaction.response.send_message("❌ Pick at least an item, an upload option, or an add-on.", ephemeral=True)
+        return
 
     items_col = "\n".join(r[0] for r in rows)
     usd_col = "\n".join(f"${r[1]}" for r in rows)
