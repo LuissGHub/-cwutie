@@ -3247,22 +3247,24 @@ TEXT_DESIGN_PRICE = (3, 350)    # (usd, robux), flat
 @app_commands.choices(
     item=[app_commands.Choice(name=v[0], value=k) for k, v in PRICE_ITEMS.items()],
     upload=[app_commands.Choice(name=v[0], value=k) for k, v in UPLOAD_OPTIONS.items()],
+    custom_charms=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
+    text_designs=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
 )
 async def price_command(
     interaction: discord.Interaction,
     item: str | None = None,
     upload: str | None = None,
-    custom_charms: bool = False,
-    text_designs: bool = False,
+    custom_charms: str = "no",
+    text_designs: str = "no",
 ):
     rows = []
     if item:
         rows.append(PRICE_ITEMS[item])
     if upload:
         rows.append(UPLOAD_OPTIONS[upload])
-    if custom_charms:
+    if custom_charms == "yes":
         rows.append(("custom charms", CUSTOM_CHARM_PRICE[0], CUSTOM_CHARM_PRICE[1]))
-    if text_designs:
+    if text_designs == "yes":
         rows.append(("text designs", TEXT_DESIGN_PRICE[0], TEXT_DESIGN_PRICE[1]))
 
     if not rows:
