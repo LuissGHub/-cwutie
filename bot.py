@@ -31,9 +31,9 @@ intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ———————————————––
+# ------------------------------------------------------------
 # Constants
-# ———————————————––
+# ------------------------------------------------------------
 
 CHECK = "<a:0000:1488556886918824068>"
 
@@ -59,7 +59,7 @@ TICKET_OWNER_DETECT_DELAY_SECONDS = 3
 ALWAYS_IGNORE_TICKET_USER_IDS = {1477820178501861446, 694219914730537102}
 
 THEMES = {
-    "pink": 0xF7CFE3,
+    "pink": 0xFFF5F9,
     "blue": 0xCFEFFF,
     "mint": 0xD8F5E3,
     "lavender": 0xE7D9FF,
@@ -78,7 +78,6 @@ SETTINGS_COLUMNS = [
     "autoreact_channel_id", "autoreact_reaction_emoji", "autoreact_super_reaction",
     "usermention_user_id", "usermention_emojis",
     "vouch_channel_id", "waitlist_role_id",
-    "botmention_message",
     "ticket_category_id", "ticket_name_prefix", "ticket_ignore_user_ids",
     "showcase_channel_id", "showcase_text", "showcase_theme", "showcase_image2_url", "showcase_image3_url",
     "fastpass_role_ids",
@@ -105,9 +104,9 @@ IMAGE_RESPONDER_COLUMNS = [
     ("title", "TEXT"),
 ]
 
-# ———————————————––
+# ------------------------------------------------------------
 # Database Helpers
-# ———————————————––
+# ------------------------------------------------------------
 
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
@@ -324,9 +323,9 @@ def get_settings(guild_id: int) -> sqlite3.Row | None:
     return row
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Theme & Embed Helpers
-# ———————————————––
+# ------------------------------------------------------------
 
 def get_theme_color(name: str | None) -> int:
     if not name:
@@ -373,9 +372,9 @@ def build_embed(
     return embed
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Utility Helpers
-# ———————————————––
+# ------------------------------------------------------------
 
 def guild_only(interaction: discord.Interaction) -> discord.Guild:
     if interaction.guild is None:
@@ -573,9 +572,9 @@ async def fetch_image_file(image_url: str) -> discord.File | None:
         return None
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Image Responder Helpers
-# ———————————————––
+# ------------------------------------------------------------
 
 async def post_image_responder(channel: discord.abc.Messageable, img) -> None:
     """Posts an image responder row (any dict-like / sqlite Row with the
@@ -645,9 +644,9 @@ async def send_responder_preview(
         await interaction.followup.send(f"{header}\n{build_plain_image_content(caption, image_url)}".strip(), ephemeral=True)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Waitlist Helpers
-# ———————————————––
+# ------------------------------------------------------------
 
 def load_waitlists():
     try:
@@ -805,9 +804,9 @@ async def remove_waitlist_entry_by_channel(bot, guild_id: int, channel_id: int) 
     return True
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Modals
-# ———————————————––
+# ------------------------------------------------------------
 
 class EmbedModal(discord.ui.Modal, title="Create Embed"):
     embed_title = discord.ui.TextInput(label="Title", required=False, max_length=256, placeholder="e.g.  ✨ server rules")
@@ -1025,9 +1024,9 @@ class ShowcaseSetupModal(discord.ui.Modal, title="Showcase Template"):
         )
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Verify Views
-# ———————————————––
+# ------------------------------------------------------------
 
 class VerifyButton(discord.ui.Button):
     def __init__(self, label: str = "Verify", emoji=None):
@@ -1063,9 +1062,9 @@ class VerifyView(discord.ui.View):
         self.add_item(VerifyButton(label=button_label, emoji=button_emoji))
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Waitlist Views
-# ———————————————––
+# ------------------------------------------------------------
 
 class WaitlistRemoveSelect(discord.ui.Select):
     def __init__(self, options):
@@ -1174,9 +1173,9 @@ class WaitlistMovePositionView(discord.ui.View):
         self.add_item(WaitlistMovePositionSelect(channel_id, entries, guild))
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Events
-# ———————————————––
+# ------------------------------------------------------------
 
 @bot.event
 async def on_ready():
@@ -1524,15 +1523,6 @@ async def on_message(message: discord.Message):
                     elif len(matches) > 1:
                         print(f"[DEBUG] Vouch from {message.author.id} matched multiple waitlist entries {matches}; skipped auto-removal")
 
-    # Bot mention reply — someone @'d the bot directly, send a text reply
-    if bot.user in message.mentions:
-        reply_text = (settings["botmention_message"] if settings and settings["botmention_message"] else "👋 Hey, what's up?")
-        reply_text = reply_text.replace("{mention}", message.author.mention).replace("\\n", "\n")
-        try:
-            await message.reply(reply_text, mention_author=False)
-        except Exception as e:
-            print(f"[DEBUG] Failed to reply to bot mention: {e}")
-
     content = message.content.strip()
     content_lower = content.lower()
 
@@ -1597,9 +1587,9 @@ async def on_message(message: discord.Message):
     conn.close()
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Embeds
-# ———————————————––
+# ------------------------------------------------------------
 
 @bot.tree.command(name="embed", description="Create and post a custom embed in this channel")
 @app_commands.describe(title="Embed title", description="Embed text", color="Theme or hex color", image="Big image URL", thumbnail="Small image URL", use_avatar="Use your avatar as thumbnail", save="Save as named embed")
@@ -1736,9 +1726,9 @@ async def embeddelete(interaction: discord.Interaction, name: str):
     await interaction.response.send_message(msg, ephemeral=True)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Welcome
-# ———————————————––
+# ------------------------------------------------------------
 
 @bot.tree.command(name="welcome_setup", description="Set up the welcome message")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -1852,9 +1842,9 @@ async def themes(interaction: discord.Interaction):
     await interaction.response.send_message(f"**Embed colors:** {names}\nOr use any hex like `#f7cfe3`", ephemeral=True)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Boost
-# ———————————————––
+# ------------------------------------------------------------
 
 @bot.tree.command(name="set_boost_channel", description="Set the channel for boost announcements")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -1993,9 +1983,9 @@ async def boost_reaction_clear(interaction: discord.Interaction):
     await interaction.response.send_message(f"{CHECK} Boost auto-react disabled.", ephemeral=True)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Verify
-# ———————————————––
+# ------------------------------------------------------------
 
 @bot.tree.command(name="verify_message", description="Create or edit the verify embed")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -2070,9 +2060,9 @@ async def verify_responses(interaction: discord.Interaction, success_message: st
     await interaction.response.send_message(f"{CHECK} Verify responses updated!", ephemeral=True)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Autoreact
-# ———————————————––
+# ------------------------------------------------------------
 
 @bot.tree.command(name="autoreact_setup", description="Set up auto-reaction in one or more channels")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -2186,9 +2176,9 @@ async def autoreact_clear(interaction: discord.Interaction):
     await interaction.response.send_message(f"{CHECK} Autoreact disabled.", ephemeral=True)
 
 
-# ———————————————––
-# Commands — User Mention Reactions & Bot Mention Reply
-# ———————————————––
+# ------------------------------------------------------------
+# Commands — User Mention Reactions
+# ------------------------------------------------------------
 
 @bot.tree.command(name="usermention_setup", description="React with emojis whenever someone @'s a specific user")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -2234,27 +2224,9 @@ async def usermention_clear(interaction: discord.Interaction):
     await interaction.response.send_message(f"{CHECK} User-mention auto-react disabled.", ephemeral=True)
 
 
-@bot.tree.command(name="botmention_setup", description="Set the text the bot replies with when someone @'s it")
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(message="Reply text (use {mention} for the pinging user)")
-async def botmention_setup(interaction: discord.Interaction, message: str):
-    guild = guild_only(interaction)
-    upsert_settings(guild.id, botmention_message=message.replace("\\n", "\n"))
-    preview = message.replace("{mention}", interaction.user.mention).replace("\\n", "\n")
-    await interaction.response.send_message(f"{CHECK} Bot-mention reply set! Preview:\n{preview}", ephemeral=True)
-
-
-@bot.tree.command(name="botmention_clear", description="Reset the bot-mention reply back to the default")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def botmention_clear(interaction: discord.Interaction):
-    guild = guild_only(interaction)
-    upsert_settings(guild.id, botmention_message="")
-    await interaction.response.send_message(f"{CHECK} Bot-mention reply reset to default.", ephemeral=True)
-
-
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Sticky
-# ———————————————––
+# ------------------------------------------------------------
 
 @bot.tree.command(name="sticky_set", description="Set a sticky message for this channel")
 @app_commands.checks.has_permissions(manage_messages=True)
@@ -2297,9 +2269,9 @@ async def sticky_view(interaction: discord.Interaction):
     await interaction.response.send_message(row["message"].replace("\\n", "\n"), ephemeral=True)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Autoresponder
-# ———————————————––
+# ------------------------------------------------------------
 
 @bot.tree.command(name="autoresponder_add", description="Create an autoresponder trigger")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -2386,9 +2358,9 @@ async def autoresponder_list(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Image Responder (also replaces the old saved-embed commands)
-# ———————————————––
+# ------------------------------------------------------------
 
 @bot.tree.command(name="imageresponder_add", description="Post an embed or image when a keyword is triggered")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -2590,9 +2562,9 @@ async def imageresponder_list(interaction: discord.Interaction):
         await interaction.followup.send(embeds=embeds[i:i + 10], ephemeral=True)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Lim (redeem message template)
-# ———————————————––
+# ------------------------------------------------------------
 
 LIM_TEMPLATE_NAME = "default"
 
@@ -2631,9 +2603,9 @@ async def lim_command(interaction: discord.Interaction, code: str):
     await interaction.response.send_message(filled)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Waitlist
-# ———————————————––
+# ------------------------------------------------------------
 
 @bot.tree.command(name="waitlist_create", description="Create a waitlist")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -2785,9 +2757,9 @@ async def waitlist_move(interaction: discord.Interaction):
     await interaction.response.send_message("Pick an entry to move:", view=view, ephemeral=True)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Vouch (auto-remove from waitlist)
-# ———————————————––
+# ------------------------------------------------------------
 
 @bot.tree.command(name="vouch_setup", description="When someone posts in the vouch channel, remove their waitlist role + waitlist chart entry")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -2809,9 +2781,9 @@ async def vouch_clear(interaction: discord.Interaction):
     await interaction.response.send_message(f"{CHECK} Vouch auto-removal disabled.", ephemeral=True)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Fast Pass Timers
-# ———————————————––
+# ------------------------------------------------------------
 
 # Emoji used in fast pass messages. CHECK (defined above) doubles as the
 # leading emoji throughout.
@@ -2959,9 +2931,9 @@ async def before_check_fastpass_timers():
     await bot.wait_until_ready()
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Role Management
-# ———————————————––
+# ------------------------------------------------------------
 
 role_group = app_commands.Group(name="role", description="Role management")
 
@@ -3000,9 +2972,9 @@ async def role_remove(interaction: discord.Interaction, user: discord.Member, ro
 bot.tree.add_command(role_group)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Switch (move a ticket through unpaid → paid → upload → completed)
-# ———————————————––
+# ------------------------------------------------------------
 
 # Ticket stages in order, paired with the settings column holding each
 # stage's category id. /switch moves a ticket one step down this list.
@@ -3104,9 +3076,9 @@ async def switch_command(interaction: discord.Interaction, stage: str | None = N
     await interaction.followup.send(f"{CHECK} Moved to **{target_category.name}**")
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Channel Access
-# ———————————————––
+# ------------------------------------------------------------
 
 @bot.tree.command(name="adduser", description="Add a user to the channel you're in (gives them view + send access)")
 @app_commands.checks.has_permissions(manage_channels=True)
@@ -3140,9 +3112,9 @@ async def removeuser(interaction: discord.Interaction, user: discord.Member):
     await interaction.response.send_message(f"{CHECK} Removed {user.mention} from {channel.mention}.", ephemeral=True)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Showcase
-# ———————————————––
+# ------------------------------------------------------------
 
 @bot.tree.command(name="showcase_setup", description="Set the fixed showcase template (text + the 2nd/3rd banner images)")
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -3210,9 +3182,9 @@ async def showcase_command(interaction: discord.Interaction, image: discord.Atta
     await interaction.followup.send(f"{CHECK} Showcase posted to {channel.mention}!", ephemeral=True)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Price
-# ———————————————––
+# ------------------------------------------------------------
 
 ROBUX_EMOJI = "<:ggcwutieDNSRobux:1554353658462732320>"
 
@@ -3226,9 +3198,9 @@ PRICE_ITEMS = {
     "chain": ("chain", 9, 1000),
 }
 
-# Optional upload choice. Self upload = customer uploads it themselves (free).
+# Optional upload choice. Self upload = customer uploads it themselves (price stays 0).
 UPLOAD_OPTIONS = {
-    "self_upload": ("self upload (free)", 0, 0),
+    "self_upload": ("self upload", 0, 0),
     "regular_upload": ("regular upload", 14, 1500),
     "limited_upload": ("limited upload", 3, 350),
 }
@@ -3282,9 +3254,9 @@ async def price_command(
     await interaction.response.send_message(embed=embed)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Roblox
-# ———————————————––
+# ------------------------------------------------------------
 
 roblox_group = app_commands.Group(name="roblox", description="Roblox utilities")
 
@@ -3311,9 +3283,9 @@ async def roblox_calctax(interaction: discord.Interaction, amount: int, discount
 bot.tree.add_command(roblox_group)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Emoji/Sticker Stealing
-# ———————————————––
+# ------------------------------------------------------------
 
 emoji_group = app_commands.Group(name="emoji", description="Emoji management")
 
@@ -3352,9 +3324,9 @@ async def emoji_steal(interaction: discord.Interaction, emoji: str, name: str | 
 bot.tree.add_command(emoji_group)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Commands — Sticker Stealing
-# ———————————————––
+# ------------------------------------------------------------
 
 sticker_group = app_commands.Group(name="sticker", description="Sticker management")
 
@@ -3434,9 +3406,9 @@ async def sticker_steal_context(interaction: discord.Interaction, message: disco
         await interaction.followup.send(f"❌ Error: {str(e)[:100]}", ephemeral=True)
 
 
-# ———————————————––
+# ------------------------------------------------------------
 # Run
-# ———————————————––
+# ------------------------------------------------------------
 
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable is not set")
