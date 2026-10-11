@@ -3214,7 +3214,7 @@ async def showcase_command(interaction: discord.Interaction, image: discord.Atta
 # Commands — Price
 # ———————————————––
 
-ROBUX_EMOJI = "<:001_roblox_DNS:1501267296511856712>"
+ROBUX_EMOJI = "<:ggcwutieDNSRobux:1554353658462732320>"
 
 # key: (label, usd, robux)
 PRICE_ITEMS = {
@@ -3271,21 +3271,14 @@ async def price_command(
         await interaction.response.send_message("❌ Pick at least an item, an upload option, or an add-on.", ephemeral=True)
         return
 
-    items_col = "\n".join(r[0] for r in rows)
-    usd_col = "\n".join(f"${r[1]}" for r in rows)
-    robux_col = "\n".join(f"{r[2]:,} {ROBUX_EMOJI}" for r in rows)
+    lines = [f"• **{r[0]}**\n`${r[1]}` • `{r[2]:,}` {ROBUX_EMOJI}" for r in rows]
 
     if len(rows) > 1:
         total_usd = sum(r[1] for r in rows)
         total_robux = sum(r[2] for r in rows)
-        items_col += "\n**total**"
-        usd_col += f"\n**${total_usd}**"
-        robux_col += f"\n**{total_robux:,}** {ROBUX_EMOJI}"
+        lines.append(f"**total**\n`${total_usd}` • `{total_robux:,}` {ROBUX_EMOJI}")
 
-    embed = discord.Embed(title="💸 price", color=get_theme_color("pink"))
-    embed.add_field(name="item", value=items_col, inline=True)
-    embed.add_field(name="$", value=usd_col, inline=True)
-    embed.add_field(name="robux", value=robux_col, inline=True)
+    embed = discord.Embed(title="price", description="\n\n".join(lines), color=get_theme_color("pink"))
     await interaction.response.send_message(embed=embed)
 
 
