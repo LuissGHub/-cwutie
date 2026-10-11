@@ -83,6 +83,7 @@ SETTINGS_COLUMNS = [
     "showcase_channel_id", "showcase_text", "showcase_theme", "showcase_image2_url", "showcase_image3_url",
     "fastpass_role_ids",
     "switch_unpaid_category_id", "switch_paid_category_id",
+    "switch_upload_category_id", "switch_completed_category_id",
 ]
 
 # Columns for the image_responders table that were added after the table's
@@ -3000,32 +3001,58 @@ bot.tree.add_command(role_group)
 
 
 # ———————————————––
-# Commands — Switch (move a ticket from unpaid to paid)
+# Commands — Switch (move a ticket through unpaid → paid → upload → completed)
 # ———————————————––
 
-@bot.tree.command(name="switch_setup", description="Set the unpaid and paid ticket categories used by /switch")
+# Ticket stages in order, paired with the settings column holding each
+# stage's category id. /switch moves a ticket one step down this list.
+SWITCH_STAGES = [
+    ("unpaid", "switch_unpaid_category_id"),
+    ("paid", "switch_paid_category_id"),
+    ("upload", "switch_upload_category_id"),
+    ("completed", "switch_completed_category_id"),
+]
+
+
+@bot.tree.command(name="switch_setup", description="Set the ticket stage categories used by /switch")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(unpaid="Category your unpaid tickets live in", paid="Category paid tickets get moved to")
-async def switch_setup(interaction: discord.Interaction, unpaid: discord.CategoryChannel, paid: discord.CategoryChannel):
+@app_commands.describe(
+    unpaid="Category your unpaid tickets live in",
+    paid="Category for paid tickets",
+    upload="Category for tickets waiting on upload (leave blank to keep the current one)",
+    completed="Category for completed tickets (leave blank to keep the current one)",
+)
+async def switch_setup(interaction: discord.Interaction, unpaid: discord.CategoryChannel, paid: discord.CategoryChannel, upload: discord.CategoryChannel | None = None, completed: discord.CategoryChannel | None = None):
     guild = guild_only(interaction)
-    if unpaid.id == paid.id:
-        await interaction.response.send_message("❌ The unpaid and paid categories need to be different.", ephemeral=True)
+    given = [c for c in (unpaid, paid, upload, completed) if c is not None]
+    if len({c.id for c in given}) != len(given):
+        await interaction.response.send_message("❌ Each stage needs its own category — I got the same one twice.", ephemeral=True)
         return
 
-    upsert_settings(guild.id, switch_unpaid_category_id=str(unpaid.id), switch_paid_category_id=str(paid.id))
-    await interaction.response.send_message(
-        f"{CHECK} `/switch` will now move tickets from **{unpaid.name}** → **{paid.name}**.",
-        ephemeral=True,
-    )
+    updates = dict(switch_unpaid_category_id=str(unpaid.id), switch_paid_category_id=str(paid.id))
+    if upload is not None:
+        updates["switch_upload_category_id"] = str(upload.id)
+    if completed is not None:
+        updates["switch_completed_category_id"] = str(completed.id)
+    upsert_settings(guild.id, **updates)
+
+    settings = get_settings(guild.id)
+    parts = []
+    for name, col in SWITCH_STAGES:
+        cat = guild.get_channel(int(settings[col])) if settings[col] else None
+        parts.append(f"**{cat.name}**" if cat else f"*({name} not set)*")
+    await interaction.response.send_message(f"{CHECK} `/switch` will move tickets: {' → '.join(parts)}", ephemeral=True)
 
 
-@bot.tree.command(name="switch", description="Move this ticket from unpaid to paid")
+@bot.tree.command(name="switch", description="Move this ticket to the next stage (unpaid → paid → upload → completed)")
 @app_commands.checks.has_permissions(manage_channels=True)
-async def switch_command(interaction: discord.Interaction):
+@app_commands.describe(stage="Optional: jump to a specific stage instead of the next one")
+@app_commands.choices(stage=[app_commands.Choice(name=name, value=name) for name, _ in SWITCH_STAGES])
+async def switch_command(interaction: discord.Interaction, stage: str | None = None):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
     if not settings or not settings["switch_unpaid_category_id"] or not settings["switch_paid_category_id"]:
-        await interaction.response.send_message("Run `/switch_setup` first to pick your unpaid and paid categories.", ephemeral=True)
+        await interaction.response.send_message("Run `/switch_setup` first to pick your stage categories.", ephemeral=True)
         return
 
     channel = interaction.channel
@@ -3033,34 +3060,48 @@ async def switch_command(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Use this inside a ticket channel.", ephemeral=True)
         return
 
-    unpaid_id = int(settings["switch_unpaid_category_id"])
-    paid_id = int(settings["switch_paid_category_id"])
+    names = [name for name, _ in SWITCH_STAGES]
+    category_ids = {name: (int(settings[col]) if settings[col] else None) for name, col in SWITCH_STAGES}
 
-    if channel.category_id == paid_id:
-        await interaction.response.send_message("This ticket is already in paid.", ephemeral=True)
-        return
-    if channel.category_id != unpaid_id:
-        await interaction.response.send_message("❌ This channel isn't in the unpaid category, so I can't switch it.", ephemeral=True)
+    current = next((name for name in names if category_ids[name] and category_ids[name] == channel.category_id), None)
+    if current is None:
+        await interaction.response.send_message("❌ This channel isn't in one of the ticket stage categories, so I can't switch it.", ephemeral=True)
         return
 
-    paid_category = guild.get_channel(paid_id)
-    if not isinstance(paid_category, discord.CategoryChannel):
-        await interaction.response.send_message("⚠️ I can't find the paid category anymore. Run `/switch_setup` again.", ephemeral=True)
+    if stage is None:
+        idx = names.index(current) + 1
+        if idx >= len(names):
+            await interaction.response.send_message("This ticket is already in the last stage (completed).", ephemeral=True)
+            return
+        target = names[idx]
+    else:
+        target = stage
+        if target == current:
+            await interaction.response.send_message(f"This ticket is already in {current}.", ephemeral=True)
+            return
+
+    if not category_ids[target]:
+        await interaction.response.send_message(f"⚠️ The **{target}** category isn't set yet. Run `/switch_setup` and pick it.", ephemeral=True)
+        return
+
+    target_category = guild.get_channel(category_ids[target])
+    if not isinstance(target_category, discord.CategoryChannel):
+        await interaction.response.send_message(f"⚠️ I can't find the **{target}** category anymore. Run `/switch_setup` again.", ephemeral=True)
         return
 
     await interaction.response.defer()
     try:
         # sync_permissions=False keeps the ticket's own overwrites (the
         # customer's access) instead of replacing them with the category's.
-        await channel.edit(category=paid_category, sync_permissions=False, reason=f"/switch by {interaction.user}")
+        await channel.edit(category=target_category, sync_permissions=False, reason=f"/switch by {interaction.user}")
     except discord.Forbidden:
         await interaction.followup.send("⚠️ I don't have permission to move this channel (I need Manage Channels).")
         return
     except discord.HTTPException as e:
-        await interaction.followup.send(f"⚠️ Couldn't move it: {str(e)[:150]} (is the paid category full? Discord caps categories at 50 channels).")
+        await interaction.followup.send(f"⚠️ Couldn't move it: {str(e)[:150]} (is the {target} category full? Discord caps categories at 50 channels).")
         return
 
-    await interaction.followup.send(f"{CHECK} Moved to **{paid_category.name}**")
+    await interaction.followup.send(f"{CHECK} Moved to **{target_category.name}**")
 
 
 # ———————————————––
