@@ -113,54 +113,16 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
-def migrate_saved_embeds_to_image_responders(cur: sqlite3.Cursor) -> None:
-    """One-time migration: the old /embed* saved-embed commands were folded
-    into image responders. Every saved embed becomes an image responder whose
-    trigger is the embed's old name (so a saved embed called "rules" is now
-    posted by typing .rules). Nothing is deleted — afterwards the old table is
-    just renamed to saved_embeds_migrated as a backup, which also makes sure
-    this only ever runs once (deleting a migrated responder later won't bring
-    it back)."""
+def restore_saved_embeds_if_migrated(cur: sqlite3.Cursor) -> None:
+    """Safety net: if an earlier version of this bot renamed saved_embeds to
+    saved_embeds_migrated, rename it back so saved embeds keep working."""
     cur.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'saved_embeds'")
-    if not cur.fetchone():
+    if cur.fetchone():
         return
     cur.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'saved_embeds_migrated'")
     if cur.fetchone():
-        return
-
-    cur.execute("SELECT * FROM saved_embeds")
-    rows = cur.fetchall()
-    moved = 0
-    for row in rows:
-        trigger = (row["name"] or "").lower().strip().lstrip(".")
-        if not trigger:
-            continue
-        description = row["description"]
-        if description == "\u200b":
-            description = None
-        cur.execute(
-            """
-            INSERT OR IGNORE INTO image_responders
-                (guild_id, trigger, image_url, caption, match_type, color, thumbnail_url, as_embed, title)
-            VALUES (?, ?, ?, ?, 'exact', ?, ?, 1, ?)
-            """,
-            (
-                row["guild_id"],
-                trigger,
-                row["image_url"] or "",
-                description,
-                row["theme"] or "pink",
-                None if row["use_avatar"] else row["thumbnail_url"],
-                row["embed_title"],
-            ),
-        )
-        if cur.rowcount:
-            moved += 1
-        else:
-            print(f"[MIGRATE] Skipped saved embed '{row['name']}' (guild {row['guild_id']}): an image responder with that trigger already exists. Still kept in saved_embeds_migrated.")
-
-    cur.execute("ALTER TABLE saved_embeds RENAME TO saved_embeds_migrated")
-    print(f"[MIGRATE] Moved {moved}/{len(rows)} saved embed(s) into image responders. Old table kept as saved_embeds_migrated.")
+        cur.execute("ALTER TABLE saved_embeds_migrated RENAME TO saved_embeds")
+        print("[MIGRATE] Restored saved_embeds from saved_embeds_migrated.")
 
 
 def init_db() -> None:
@@ -223,6 +185,28 @@ def init_db() -> None:
     except sqlite3.OperationalError:
         pass
 
+    restore_saved_embeds_if_migrated(cur)
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS saved_embeds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            embed_title TEXT,
+            description TEXT,
+            theme TEXT DEFAULT 'pink',
+            image_url TEXT,
+            thumbnail_url TEXT,
+            use_avatar INTEGER DEFAULT 0,
+            post_channel_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(guild_id, name)
+        )
+        """
+    )
+
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS sticky_messages (
@@ -278,10 +262,6 @@ def init_db() -> None:
             cur.execute(f"ALTER TABLE image_responders ADD COLUMN {col} {coldef}")
         except sqlite3.OperationalError:
             pass
-
-    # Folds any old saved embeds into image responders (keeps the old table
-    # as a backup — nothing gets deleted). Must run after the columns above exist.
-    migrate_saved_embeds_to_image_responders(cur)
 
     cur.execute(
         """
@@ -826,6 +806,87 @@ async def remove_waitlist_entry_by_channel(bot, guild_id: int, channel_id: int) 
 # ———————————————––
 # Modals
 # ———————————————––
+
+class EmbedModal(discord.ui.Modal, title="Create Embed"):
+    embed_title = discord.ui.TextInput(label="Title", required=False, max_length=256, placeholder="e.g.  ✨ server rules")
+    description = discord.ui.TextInput(label="Description", style=discord.TextStyle.paragraph, required=False, max_length=4000, placeholder="e.g.  welcome to cwtie ugc! ♡")
+    theme = discord.ui.TextInput(label="Color — theme name or hex", required=False, max_length=20, default="pink", placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
+    image = discord.ui.TextInput(label="Big image URL (bottom of embed)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.png")
+    thumbnail = discord.ui.TextInput(label="Small image URL (top-right corner)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/xyz456.png")
+
+    def __init__(self, use_avatar: bool, save_name: str | None = None, post_here: bool = False, is_edit: bool = False, prefill: dict | None = None):
+        super().__init__()
+        self.use_avatar = use_avatar
+        self.save_name = save_name
+        self.post_here = post_here
+        self.is_edit = is_edit
+        if prefill:
+            if prefill.get("embed_title"):
+                self.embed_title.default = prefill["embed_title"]
+            if prefill.get("description"):
+                self.description.default = prefill["description"]
+            if prefill.get("theme"):
+                self.theme.default = prefill["theme"]
+            if prefill.get("image_url"):
+                self.image.default = prefill["image_url"]
+            if prefill.get("thumbnail_url"):
+                self.thumbnail.default = prefill["thumbnail_url"]
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild_id = interaction.guild_id
+        title_val = str(self.embed_title).strip() or None
+        desc_val = str(self.description).strip() or None
+        theme_val = str(self.theme).strip() or "pink"
+        image_val = str(self.image).strip() or None
+        thumb_val = str(self.thumbnail).strip() or None
+
+        if not title_val and not desc_val and not image_val:
+            desc_val = "\u200b"
+
+        embed = build_embed(
+            title=title_val,
+            description=desc_val,
+            theme=theme_val,
+            image=image_val,
+            thumbnail=None if self.use_avatar else thumb_val,
+            user_avatar_url=interaction.user.display_avatar.url if self.use_avatar else None,
+        )
+
+        if self.save_name and guild_id:
+            now = datetime.now(timezone.utc).isoformat()
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild_id, self.save_name))
+            existing = cur.fetchone()
+            conn.close()
+
+            if existing and not self.is_edit:
+                await interaction.response.send_message(f"❌ An embed named **{self.save_name}** already exists!\nUse `/embededit {self.save_name}` to edit it.", ephemeral=True)
+                return
+
+            conn = get_db()
+            cur = conn.cursor()
+            if existing:
+                cur.execute(
+                    "UPDATE saved_embeds SET embed_title=?, description=?, theme=?, image_url=?, thumbnail_url=?, use_avatar=?, updated_at=? WHERE guild_id=? AND name=?",
+                    (title_val, desc_val, theme_val, image_val, thumb_val, int(self.use_avatar), now, guild_id, self.save_name),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO saved_embeds (guild_id, name, embed_title, description, theme, image_url, thumbnail_url, use_avatar, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (guild_id, self.save_name, title_val, desc_val, theme_val, image_val, thumb_val, int(self.use_avatar), now, now),
+                )
+            conn.commit()
+            conn.close()
+
+            if self.post_here:
+                await interaction.response.send_message(embed=embed)
+                await interaction.followup.send(f"{CHECK} Also saved as **{self.save_name}**. Use `/embedpost {self.save_name}` anytime to repost it.", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"{CHECK} Saved as **{self.save_name}**! Use `/embedpost {self.save_name}` to post it in any channel.", embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed)
+
 
 class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
     outside_text = discord.ui.TextInput(label="Text ABOVE the embed (optional)", required=False, max_length=2000, placeholder="e.g.  thank you {mention} !")
@@ -1532,6 +1593,145 @@ async def on_message(message: discord.Message):
     cur.execute("UPDATE sticky_messages SET last_message_id = ? WHERE guild_id = ? AND channel_id = ?", (new_msg.id, message.guild.id, message.channel.id))
     conn.commit()
     conn.close()
+
+
+# ———————————————––
+# Commands — Embeds
+# ———————————————––
+
+@bot.tree.command(name="embed", description="Create and post a custom embed in this channel")
+@app_commands.describe(title="Embed title", description="Embed text", color="Theme or hex color", image="Big image URL", thumbnail="Small image URL", use_avatar="Use your avatar as thumbnail", save="Save as named embed")
+async def embed_command(interaction: discord.Interaction, title: str | None = None, description: str | None = None, color: str = "pink", image: str | None = None, thumbnail: str | None = None, use_avatar: bool = False, save: str | None = None):
+    guild_id = interaction.guild_id
+    embed = build_embed(title=title, description=description, theme=color or "pink", image=image, thumbnail=None if use_avatar else thumbnail, user_avatar_url=interaction.user.display_avatar.url if use_avatar else None)
+
+    if save and guild_id:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild_id, save))
+        existing = cur.fetchone()
+        if existing:
+            conn.close()
+            await interaction.response.send_message(f"❌ An embed named **{save}** already exists! Use `/embededit {save}` to edit it.", ephemeral=True)
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        cur.execute(
+            "INSERT INTO saved_embeds (guild_id, name, embed_title, description, theme, image_url, thumbnail_url, use_avatar, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (guild_id, save, title, description, color, image, thumbnail, int(use_avatar), now, now)
+        )
+        conn.commit()
+        conn.close()
+        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(f"{CHECK} Saved as **{save}**! Use `/embedpost {save}` to repost anytime.", ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="embedlist", description="List all saved embeds")
+async def embedlist(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT name, embed_title, post_channel_id, updated_at FROM saved_embeds WHERE guild_id = ? ORDER BY name", (guild.id,))
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        await interaction.response.send_message("No saved embeds yet. Use `/embed save_name:myname` to save one.", ephemeral=True)
+        return
+
+    # Discord embeds cap out at 25 fields each, so paginate into chunks of 25
+    chunks = [rows[i:i + 25] for i in range(0, len(rows), 25)]
+    embeds = []
+    for idx, chunk in enumerate(chunks, start=1):
+        page_title = f"📋 Saved Embeds (page {idx}/{len(chunks)})" if len(chunks) > 1 else "📋 Saved Embeds"
+        embed = discord.Embed(title=page_title, color=get_theme_color("pink"))
+        for row in chunk:
+            ch = guild.get_channel(row["post_channel_id"]) if row["post_channel_id"] else None
+            ch_text = ch.mention if ch else "*(no channel)*"
+            t_text = f'"{row["embed_title"]}"' if row["embed_title"] else "*(no title)*"
+            embed.add_field(name=f"• {row['name']}", value=f"Title: {t_text}\nChannel: {ch_text}\nUpdated: {row['updated_at'][:10]}", inline=False)
+        embeds.append(embed)
+
+    # Discord also caps messages at 10 embeds each, so batch those too
+    first_batch = embeds[:10]
+    await interaction.response.send_message(embeds=first_batch, ephemeral=True)
+    for i in range(10, len(embeds), 10):
+        await interaction.followup.send(embeds=embeds[i:i + 10], ephemeral=True)
+
+
+@bot.tree.command(name="embedpost", description="Post a saved embed in the current channel")
+@app_commands.describe(name="Name of the embed")
+async def embedpost(interaction: discord.Interaction, name: str):
+    guild = guild_only(interaction)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        await interaction.response.send_message(f"No embed named **{name}**. Use `/embedlist`.", ephemeral=True)
+        return
+
+    embed = build_embed(title=row["embed_title"], description=row["description"] or "\u200b", theme=row["theme"] or "pink", image=row["image_url"], thumbnail=None if row["use_avatar"] else row["thumbnail_url"])
+    await interaction.response.defer(ephemeral=True)
+    await interaction.channel.send(embed=embed)
+
+
+@bot.tree.command(name="embededit", description="Edit a saved embed")
+@app_commands.describe(name="Name of the embed to edit")
+async def embededit(interaction: discord.Interaction, name: str):
+    guild = guild_only(interaction)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        await interaction.response.send_message(f"No embed named **{name}**.", ephemeral=True)
+        return
+
+    prefill = {"embed_title": row["embed_title"], "description": row["description"], "theme": row["theme"], "image_url": row["image_url"], "thumbnail_url": row["thumbnail_url"]}
+    await interaction.response.send_modal(EmbedModal(use_avatar=bool(row["use_avatar"]), save_name=name, is_edit=True, prefill=prefill))
+
+
+@bot.tree.command(name="embedchannel", description="Set which channel a saved embed posts to")
+@app_commands.describe(name="Name of the embed", channel="Channel to post it in")
+async def embedchannel(interaction: discord.Interaction, name: str, channel: discord.TextChannel):
+    guild = guild_only(interaction)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
+    row = cur.fetchone()
+
+    if not row:
+        conn.close()
+        await interaction.response.send_message(f"No embed named **{name}**.", ephemeral=True)
+        return
+
+    cur.execute("UPDATE saved_embeds SET post_channel_id = ? WHERE guild_id = ? AND name = ?", (channel.id, guild.id, name))
+    conn.commit()
+    conn.close()
+
+    await interaction.response.send_message(f"{CHECK} **{name}** will post to {channel.mention}.", ephemeral=True)
+
+
+@bot.tree.command(name="embeddelete", description="Delete a saved embed")
+@app_commands.describe(name="Name of the embed to delete")
+async def embeddelete(interaction: discord.Interaction, name: str):
+    guild = guild_only(interaction)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+
+    msg = f"🗑️ Deleted **{name}**." if deleted else f"No embed named **{name}**."
+    await interaction.response.send_message(msg, ephemeral=True)
 
 
 # ———————————————––
