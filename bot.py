@@ -3271,12 +3271,12 @@ async def price_command(
         await interaction.response.send_message("❌ Pick at least an item, an upload option, or an add-on.", ephemeral=True)
         return
 
-    lines = [f"• **{r[0]}**\n`${r[1]}` • `{r[2]:,}` {ROBUX_EMOJI}" for r in rows]
+    lines = [f"• **{r[0]}**\n`{r[2]:,}` {ROBUX_EMOJI} • `${r[1]}`" for r in rows]
 
     if len(rows) > 1:
         total_usd = sum(r[1] for r in rows)
         total_robux = sum(r[2] for r in rows)
-        lines.append(f"**total**\n`${total_usd}` • `{total_robux:,}` {ROBUX_EMOJI}")
+        lines.append(f"**total**\n`{total_robux:,}` {ROBUX_EMOJI} • `${total_usd}`")
 
     embed = discord.Embed(title="price", description="\n\n".join(lines), color=get_theme_color("pink"))
     await interaction.response.send_message(embed=embed)
