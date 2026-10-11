@@ -3260,18 +3260,6 @@ async def price_command(
         disc_usd = round(total_usd * 0.90, 2)
         disc_usd_text = f"{disc_usd:.2f}".rstrip("0").rstrip(".")
         lines.append(f"**after 10% discount**\n`{disc_robux:,}` {ROBUX_EMOJI} • `${disc_usd_text}`")
-        final_robux = disc_robux
-    else:
-        final_robux = total_robux
-
-    # Roblox Plus lets people send Robux without the 30% tax, so the plain
-    # Robux price applies. Without Roblox Plus, Roblox keeps 30%, so they'd
-    # need to send more to cover it (same math as /roblox calctax's
-    # "Total cost to cover tax").
-    if final_robux > 0:
-        with_tax_robux = round(final_robux / 0.70)
-        lines.append(f"**with roblox plus (no tax)**\n`{final_robux:,}` {ROBUX_EMOJI}")
-        lines.append(f"**without roblox plus (tax covered)**\n`{with_tax_robux:,}` {ROBUX_EMOJI}")
 
     embed = discord.Embed(title="price", description="\n\n".join(lines), color=get_theme_color("pink"))
     await interaction.response.send_message(embed=embed)
