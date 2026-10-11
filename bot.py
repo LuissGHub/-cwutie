@@ -98,6 +98,9 @@ IMAGE_RESPONDER_COLUMNS = [
     # Optional second image, posted as its own follow-up embed right after
     # the first (same pattern as welcome/boost's banner2_url). Embed mode only.
     ("image_url2", "TEXT"),
+    # Optional embed title (this is what lets image responders fully replace
+    # the old saved-embed commands). Embed mode only.
+    ("title", "TEXT"),
 ]
 
 # ———————————————––
@@ -108,6 +111,56 @@ def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def migrate_saved_embeds_to_image_responders(cur: sqlite3.Cursor) -> None:
+    """One-time migration: the old /embed* saved-embed commands were folded
+    into image responders. Every saved embed becomes an image responder whose
+    trigger is the embed's old name (so a saved embed called "rules" is now
+    posted by typing .rules). Nothing is deleted — afterwards the old table is
+    just renamed to saved_embeds_migrated as a backup, which also makes sure
+    this only ever runs once (deleting a migrated responder later won't bring
+    it back)."""
+    cur.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'saved_embeds'")
+    if not cur.fetchone():
+        return
+    cur.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'saved_embeds_migrated'")
+    if cur.fetchone():
+        return
+
+    cur.execute("SELECT * FROM saved_embeds")
+    rows = cur.fetchall()
+    moved = 0
+    for row in rows:
+        trigger = (row["name"] or "").lower().strip().lstrip(".")
+        if not trigger:
+            continue
+        description = row["description"]
+        if description == "\u200b":
+            description = None
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO image_responders
+                (guild_id, trigger, image_url, caption, match_type, color, thumbnail_url, as_embed, title)
+            VALUES (?, ?, ?, ?, 'exact', ?, ?, 1, ?)
+            """,
+            (
+                row["guild_id"],
+                trigger,
+                row["image_url"] or "",
+                description,
+                row["theme"] or "pink",
+                None if row["use_avatar"] else row["thumbnail_url"],
+                row["embed_title"],
+            ),
+        )
+        if cur.rowcount:
+            moved += 1
+        else:
+            print(f"[MIGRATE] Skipped saved embed '{row['name']}' (guild {row['guild_id']}): an image responder with that trigger already exists. Still kept in saved_embeds_migrated.")
+
+    cur.execute("ALTER TABLE saved_embeds RENAME TO saved_embeds_migrated")
+    print(f"[MIGRATE] Moved {moved}/{len(rows)} saved embed(s) into image responders. Old table kept as saved_embeds_migrated.")
 
 
 def init_db() -> None:
@@ -172,40 +225,6 @@ def init_db() -> None:
 
     cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS saved_embeds (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            embed_title TEXT,
-            description TEXT,
-            theme TEXT DEFAULT 'pink',
-            image_url TEXT,
-            thumbnail_url TEXT,
-            use_avatar INTEGER DEFAULT 0,
-            post_channel_id INTEGER,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(guild_id, name)
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS embed_collections (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            embed_names TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(guild_id, name)
-        )
-        """
-    )
-
-    cur.execute(
-        """
         CREATE TABLE IF NOT EXISTS sticky_messages (
             guild_id INTEGER NOT NULL,
             channel_id INTEGER NOT NULL,
@@ -236,7 +255,7 @@ def init_db() -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             guild_id INTEGER NOT NULL,
             trigger TEXT NOT NULL,
-            image_url TEXT NOT NULL,
+            image_url TEXT NOT NULL DEFAULT '',
             caption TEXT,
             match_type TEXT DEFAULT 'exact',
             color TEXT DEFAULT 'pink',
@@ -245,19 +264,24 @@ def init_db() -> None:
             footer_icon TEXT,
             as_embed INTEGER DEFAULT 1,
             image_url2 TEXT,
+            title TEXT,
             UNIQUE(guild_id, trigger)
         )
         """
     )
 
-    # Carries "color" / "thumbnail_url" / "footer" / "footer_icon" / "as_embed" / "image_url2"
-    # onto any image_responders table that was created before those columns
-    # existed (CREATE TABLE IF NOT EXISTS above only applies to brand-new tables).
+    # Carries the newer columns onto any image_responders table that was
+    # created before they existed (CREATE TABLE IF NOT EXISTS above only
+    # applies to brand-new tables).
     for col, coldef in IMAGE_RESPONDER_COLUMNS:
         try:
             cur.execute(f"ALTER TABLE image_responders ADD COLUMN {col} {coldef}")
         except sqlite3.OperationalError:
             pass
+
+    # Folds any old saved embeds into image responders (keeps the old table
+    # as a backup — nothing gets deleted). Must run after the columns above exist.
+    migrate_saved_embeds_to_image_responders(cur)
 
     cur.execute(
         """
@@ -299,7 +323,7 @@ def upsert_settings(guild_id: int, **kwargs) -> None:
     updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
     if not updates:
         return
-    
+
     conn = get_db()
     cur = conn.cursor()
     cur.execute("INSERT OR IGNORE INTO settings (guild_id) VALUES (?)", (guild_id,))
@@ -352,9 +376,9 @@ def build_embed(
     safe_desc = description
     if not title and not safe_desc and not image:
         safe_desc = "\u200b"
-    
+
     embed = discord.Embed(title=title, description=safe_desc, color=get_theme_color(theme))
-    
+
     if image:
         embed.set_image(url=image)
     if user_avatar_url:
@@ -363,7 +387,7 @@ def build_embed(
         embed.set_thumbnail(url=thumbnail)
     if footer:
         embed.set_footer(text=footer, icon_url=footer_icon or None)
-    
+
     return embed
 
 
@@ -529,12 +553,15 @@ def check_trigger(content_lower: str, trigger: str, match_type: str) -> bool:
     return content_lower == f".{trigger}"
 
 
-def build_plain_image_content(caption: str | None, image_url: str) -> str:
+def build_plain_image_content(caption: str | None, image_url: str | None) -> str:
     """Builds the text for a non-embed image responder: the caption (if any)
     followed by the raw image link. Discord auto-previews the link inline, so
     it shows up as the image/gif without an embed box around it."""
     caption = (caption or "").strip()
-    return f"{caption}\n{image_url}" if caption else image_url
+    image_url = (image_url or "").strip()
+    if caption and image_url:
+        return f"{caption}\n{image_url}"
+    return caption or image_url
 
 
 PLAIN_IMAGE_MAX_BYTES = 8 * 1024 * 1024
@@ -562,6 +589,78 @@ async def fetch_image_file(image_url: str) -> discord.File | None:
     except Exception as e:
         print(f"[DEBUG] Failed to download image {image_url}: {e!r}")
         return None
+
+
+# ———————————————––
+# Image Responder Helpers
+# ———————————————––
+
+async def post_image_responder(channel: discord.abc.Messageable, img) -> None:
+    """Posts an image responder row (any dict-like / sqlite Row with the
+    image_responders columns) into a channel."""
+    image_url = img["image_url"] or None
+
+    if img["as_embed"] == 0:
+        # Plain (non-embed) mode: re-upload the image as an attachment so
+        # only the picture (and caption, if any) shows. Falls back to the
+        # raw link if the download fails. (No title / 2nd-image support in
+        # plain mode — leave as_embed on to use those.)
+        if not image_url:
+            if img["caption"]:
+                await channel.send(img["caption"])
+            return
+        file = await fetch_image_file(image_url)
+        if file:
+            await channel.send(content=(img["caption"] or None), file=file)
+        else:
+            await channel.send(build_plain_image_content(img["caption"], image_url))
+        return
+
+    theme = img["color"] or "pink"
+    embed = build_embed(
+        title=img["title"] or None,
+        description=img["caption"] or None,
+        theme=theme,
+        image=image_url,
+        thumbnail=img["thumbnail_url"] or None,
+        footer=img["footer"] or None,
+        footer_icon=img["footer_icon"] or None,
+    )
+    await channel.send(embed=embed)
+    if img["image_url2"]:
+        embed2 = build_embed(title=None, description=None, theme=theme, image=img["image_url2"])
+        await channel.send(embed=embed2)
+
+
+async def send_responder_preview(
+    interaction: discord.Interaction,
+    header: str,
+    *,
+    title: str | None,
+    caption: str | None,
+    image_url: str | None,
+    image_url2: str | None,
+    color: str | None,
+    thumbnail_url: str | None,
+    footer: str | None,
+    footer_icon: str | None,
+    as_embed: bool,
+) -> None:
+    """Ephemeral preview shown after /imageresponder_add and /imageresponder_edit."""
+    if as_embed:
+        theme = color or "pink"
+        embeds = [build_embed(title=title or None, description=caption or None, theme=theme, image=image_url or None, thumbnail=thumbnail_url or None, footer=footer or None, footer_icon=footer_icon or None)]
+        if image_url2:
+            embeds.append(build_embed(title=None, description=None, theme=theme, image=image_url2))
+        await interaction.response.send_message(header, embeds=embeds, ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    file = await fetch_image_file(image_url) if image_url else None
+    if file:
+        await interaction.followup.send(f"{header}\n{caption or ''}".strip(), file=file, ephemeral=True)
+    else:
+        await interaction.followup.send(f"{header}\n{build_plain_image_content(caption, image_url)}".strip(), ephemeral=True)
 
 
 # ———————————————––
@@ -626,7 +725,7 @@ def build_waitlist_embed(guild, title, entries, color="pink"):
             if label:
                 line += f" {label}"
             lines.append(line)
-    
+
     description = "\n".join(lines) if lines else "*No orders in the waitlist yet.*"
     return discord.Embed(title=title, description=description, color=get_theme_color(color))
 
@@ -636,16 +735,16 @@ async def update_waitlist_message(bot, guild_id: int):
     key = get_waitlist_key(guild_id)
     if key not in data:
         return
-    
+
     entry = data[key]
     guild = bot.get_guild(guild_id)
     if not guild:
         return
-    
+
     channel = guild.get_channel(entry["channel_id"])
     if not channel:
         return
-    
+
     try:
         message = await channel.fetch_message(entry["message_id"])
         embed = build_waitlist_embed(guild, entry["title"], entry["users"], entry.get("color", "pink"))
@@ -728,87 +827,6 @@ async def remove_waitlist_entry_by_channel(bot, guild_id: int, channel_id: int) 
 # Modals
 # ———————————————––
 
-class EmbedModal(discord.ui.Modal, title="Create Embed"):
-    embed_title = discord.ui.TextInput(label="Title", required=False, max_length=256, placeholder="e.g.  ✨ server rules")
-    description = discord.ui.TextInput(label="Description", style=discord.TextStyle.paragraph, required=False, max_length=4000, placeholder="e.g.  welcome to cwtie ugc! ♡")
-    theme = discord.ui.TextInput(label="Color — theme name or hex", required=False, max_length=20, default="pink", placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
-    image = discord.ui.TextInput(label="Big image URL (bottom of embed)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.png")
-    thumbnail = discord.ui.TextInput(label="Small image URL (top-right corner)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/xyz456.png")
-
-    def __init__(self, use_avatar: bool, save_name: str | None = None, post_here: bool = False, is_edit: bool = False, prefill: dict | None = None):
-        super().__init__()
-        self.use_avatar = use_avatar
-        self.save_name = save_name
-        self.post_here = post_here
-        self.is_edit = is_edit
-        if prefill:
-            if prefill.get("embed_title"):
-                self.embed_title.default = prefill["embed_title"]
-            if prefill.get("description"):
-                self.description.default = prefill["description"]
-            if prefill.get("theme"):
-                self.theme.default = prefill["theme"]
-            if prefill.get("image_url"):
-                self.image.default = prefill["image_url"]
-            if prefill.get("thumbnail_url"):
-                self.thumbnail.default = prefill["thumbnail_url"]
-
-    async def on_submit(self, interaction: discord.Interaction):
-        guild_id = interaction.guild_id
-        title_val = str(self.embed_title).strip() or None
-        desc_val = str(self.description).strip() or None
-        theme_val = str(self.theme).strip() or "pink"
-        image_val = str(self.image).strip() or None
-        thumb_val = str(self.thumbnail).strip() or None
-
-        if not title_val and not desc_val and not image_val:
-            desc_val = "\u200b"
-
-        embed = build_embed(
-            title=title_val,
-            description=desc_val,
-            theme=theme_val,
-            image=image_val,
-            thumbnail=None if self.use_avatar else thumb_val,
-            user_avatar_url=interaction.user.display_avatar.url if self.use_avatar else None,
-        )
-
-        if self.save_name and guild_id:
-            now = datetime.now(timezone.utc).isoformat()
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute("SELECT id FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild_id, self.save_name))
-            existing = cur.fetchone()
-            conn.close()
-
-            if existing and not self.is_edit:
-                await interaction.response.send_message(f"❌ An embed named **{self.save_name}** already exists!\nUse `/embededit {self.save_name}` to edit it.", ephemeral=True)
-                return
-
-            conn = get_db()
-            cur = conn.cursor()
-            if existing:
-                cur.execute(
-                    "UPDATE saved_embeds SET embed_title=?, description=?, theme=?, image_url=?, thumbnail_url=?, use_avatar=?, updated_at=? WHERE guild_id=? AND name=?",
-                    (title_val, desc_val, theme_val, image_val, thumb_val, int(self.use_avatar), now, guild_id, self.save_name),
-                )
-            else:
-                cur.execute(
-                    "INSERT INTO saved_embeds (guild_id, name, embed_title, description, theme, image_url, thumbnail_url, use_avatar, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (guild_id, self.save_name, title_val, desc_val, theme_val, image_val, thumb_val, int(self.use_avatar), now, now),
-                )
-            conn.commit()
-            conn.close()
-
-            if self.post_here:
-                await interaction.response.send_message(embed=embed)
-                await interaction.followup.send(f"{CHECK} Also saved as **{self.save_name}**. Use `/embedpost {self.save_name}` anytime to repost it.", ephemeral=True)
-            else:
-                await interaction.response.send_message(f"{CHECK} Saved as **{self.save_name}**! Use `/embedpost {self.save_name}` to post it in any channel.", embed=embed, ephemeral=True)
-        else:
-            await interaction.response.send_message(embed=embed)
-
-
 class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
     outside_text = discord.ui.TextInput(label="Text ABOVE the embed (optional)", required=False, max_length=2000, placeholder="e.g.  thank you {mention} !")
     welcome_title = discord.ui.TextInput(label="Embed title (optional)", required=False, max_length=256, placeholder="e.g.  🐇 welcome to cwtie ugc!")
@@ -839,7 +857,7 @@ class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
             kwargs["welcome_theme"] = str(self.theme).strip()
         if str(self.banner_url).strip():
             kwargs["welcome_banner_url"] = str(self.banner_url).strip()
-        
+
         upsert_settings(guild.id, **kwargs)
         preview = build_embed(
             title=title_val.replace("{mention}", interaction.user.mention) if title_val else None,
@@ -956,18 +974,18 @@ class VerifyButton(discord.ui.Button):
         guild = interaction.guild
         settings = get_settings(guild.id)
         role_id = settings["verify_role_id"] if settings else None
-        
+
         if not role_id:
             return await interaction.response.send_message("⚠️ No verify role set.", ephemeral=True)
-        
+
         role = guild.get_role(int(role_id))
         if not role:
             return await interaction.response.send_message("⚠️ Verify role not found.", ephemeral=True)
-        
+
         if role in interaction.user.roles:
             msg = (settings["verify_already_message"] or f"{CHECK} You're already verified!")
             return await interaction.response.send_message(msg, ephemeral=True)
-        
+
         try:
             await interaction.user.add_roles(role)
             msg = (settings["verify_success_message"] or f"{CHECK} You've been verified!")
@@ -1241,11 +1259,11 @@ async def on_member_join(member: discord.Member):
     settings = get_settings(member.guild.id)
     if not settings or not settings["welcome_channel_id"]:
         return
-    
+
     channel = member.guild.get_channel(settings["welcome_channel_id"])
     if not channel:
         return
-    
+
     description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", member.mention).replace("\\n", "\n")
     title = (settings["welcome_title"] or None)
     if title:
@@ -1263,7 +1281,7 @@ async def on_member_join(member: discord.Member):
         user_avatar_url=member.display_avatar.url if not thumb else None,
     )
     await channel.send(content=outside_text, embed=embed)
-    
+
     if settings["welcome_banner2_url"]:
         embed2 = build_embed(title=None, description=None, theme=settings["welcome_theme"] or "pink", image=settings["welcome_banner2_url"])
         await channel.send(embed=embed2)
@@ -1275,11 +1293,11 @@ async def on_member_update(before: discord.Member, after: discord.Member):
         settings = get_settings(after.guild.id)
         if not settings or not settings["boost_channel_id"]:
             return
-        
+
         channel = after.guild.get_channel(int(settings["boost_channel_id"]))
         if not channel:
             return
-        
+
         text = (settings["boost_text"] or "thank you {mention} for boosting! ♡").replace("{mention}", after.mention).replace("{username}", after.name).replace("{server}", after.guild.name)
         outside_text = settings["boost_outside_text"] if settings["boost_outside_text"] else None
         if outside_text:
@@ -1328,9 +1346,9 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
-    
+
     await bot.process_commands(message)
-    
+
     if not message.guild:
         return
 
@@ -1345,9 +1363,9 @@ async def on_message(message: discord.Message):
             cur.execute("SELECT last_message_id FROM sticky_messages WHERE guild_id = ? AND channel_id = ?", (message.guild.id, message.channel.id))
             sticky_row = cur.fetchone()
             conn.close()
-            
+
             is_sticky = sticky_row and sticky_row["last_message_id"] == message.id
-            
+
             if not is_sticky:
                 reaction_emojis = settings["autoreact_reaction_emoji"]
                 super_reaction = settings["autoreact_super_reaction"] == "1"
@@ -1474,37 +1492,14 @@ async def on_message(message: discord.Message):
     # Image responders
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT trigger, image_url, image_url2, caption, match_type, color, thumbnail_url, footer, footer_icon, as_embed FROM image_responders WHERE guild_id = ?", (message.guild.id,))
+    cur.execute("SELECT * FROM image_responders WHERE guild_id = ?", (message.guild.id,))
     all_imgs = cur.fetchall()
     conn.close()
 
     for img in all_imgs:
         if check_trigger(content_lower, img["trigger"], img["match_type"] or "exact"):
             try:
-                if img["as_embed"] == 0:
-                    # Plain (non-embed) mode: re-upload the image as an attachment so
-                    # only the picture (and caption, if any) shows. Falls back to the
-                    # raw link if the download fails. (No 2nd-image support in plain
-                    # mode — set as_embed to use that.)
-                    file = await fetch_image_file(img["image_url"])
-                    if file:
-                        await message.channel.send(content=(img["caption"] or None), file=file)
-                    else:
-                        await message.channel.send(build_plain_image_content(img["caption"], img["image_url"]))
-                else:
-                    embed = build_embed(
-                        title=None,
-                        description=img["caption"] or None,
-                        theme=img["color"] or "pink",
-                        image=img["image_url"],
-                        thumbnail=img["thumbnail_url"] or None,
-                        footer=img["footer"] or None,
-                        footer_icon=img["footer_icon"] or None,
-                    )
-                    await message.channel.send(embed=embed)
-                    if img["image_url2"]:
-                        embed2 = build_embed(title=None, description=None, theme=img["color"] or "pink", image=img["image_url2"])
-                        await message.channel.send(embed=embed2)
+                await post_image_responder(message.channel, img)
             except Exception as e:
                 print(f"[DEBUG] Failed to send image responder '{img['trigger']}': {e!r}")
             break
@@ -1540,376 +1535,6 @@ async def on_message(message: discord.Message):
 
 
 # ———————————————––
-# Commands — Embeds
-# ———————————————––
-
-@bot.tree.command(name="embed", description="Create and post a custom embed in this channel")
-@app_commands.describe(title="Embed title", description="Embed text", color="Theme or hex color", image="Big image URL", thumbnail="Small image URL", use_avatar="Use your avatar as thumbnail", save="Save as named embed")
-async def embed_command(interaction: discord.Interaction, title: str | None = None, description: str | None = None, color: str = "pink", image: str | None = None, thumbnail: str | None = None, use_avatar: bool = False, save: str | None = None):
-    guild_id = interaction.guild_id
-    embed = build_embed(title=title, description=description, theme=color or "pink", image=image, thumbnail=None if use_avatar else thumbnail, user_avatar_url=interaction.user.display_avatar.url if use_avatar else None)
-    
-    if save and guild_id:
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild_id, save))
-        existing = cur.fetchone()
-        if existing:
-            conn.close()
-            await interaction.response.send_message(f"❌ An embed named **{save}** already exists! Use `/embededit {save}` to edit it.", ephemeral=True)
-            return
-        
-        now = datetime.now(timezone.utc).isoformat()
-        cur.execute(
-            "INSERT INTO saved_embeds (guild_id, name, embed_title, description, theme, image_url, thumbnail_url, use_avatar, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (guild_id, save, title, description, color, image, thumbnail, int(use_avatar), now, now)
-        )
-        conn.commit()
-        conn.close()
-        await interaction.response.send_message(embed=embed)
-        await interaction.followup.send(f"{CHECK} Saved as **{save}**! Use `/embedpost {save}` to repost anytime.", ephemeral=True)
-    else:
-        await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="embedlist", description="List all saved embeds")
-async def embedlist(interaction: discord.Interaction):
-    guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT name, embed_title, post_channel_id, updated_at FROM saved_embeds WHERE guild_id = ? ORDER BY name", (guild.id,))
-    rows = cur.fetchall()
-    conn.close()
-    
-    if not rows:
-        await interaction.response.send_message("No saved embeds yet. Use `/embed save_name:myname` to save one.", ephemeral=True)
-        return
-    
-    # Discord embeds cap out at 25 fields each, so paginate into chunks of 25
-    chunks = [rows[i:i + 25] for i in range(0, len(rows), 25)]
-    embeds = []
-    for idx, chunk in enumerate(chunks, start=1):
-        page_title = f"📋 Saved Embeds (page {idx}/{len(chunks)})" if len(chunks) > 1 else "📋 Saved Embeds"
-        embed = discord.Embed(title=page_title, color=get_theme_color("pink"))
-        for row in chunk:
-            ch = guild.get_channel(row["post_channel_id"]) if row["post_channel_id"] else None
-            ch_text = ch.mention if ch else "*(no channel)*"
-            t_text = f'"{row["embed_title"]}"' if row["embed_title"] else "*(no title)*"
-            embed.add_field(name=f"• {row['name']}", value=f"Title: {t_text}\nChannel: {ch_text}\nUpdated: {row['updated_at'][:10]}", inline=False)
-        embeds.append(embed)
-    
-    # Discord also caps messages at 10 embeds each, so batch those too
-    first_batch = embeds[:10]
-    await interaction.response.send_message(embeds=first_batch, ephemeral=True)
-    for i in range(10, len(embeds), 10):
-        await interaction.followup.send(embeds=embeds[i:i + 10], ephemeral=True)
-
-
-@bot.tree.command(name="embedpost", description="Post a saved embed in the current channel")
-@app_commands.describe(name="Name of the embed")
-async def embedpost(interaction: discord.Interaction, name: str):
-    guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
-    row = cur.fetchone()
-    conn.close()
-    
-    if not row:
-        await interaction.response.send_message(f"No embed named **{name}**. Use `/embedlist`.", ephemeral=True)
-        return
-    
-    embed = build_embed(title=row["embed_title"], description=row["description"] or "\u200b", theme=row["theme"] or "pink", image=row["image_url"], thumbnail=None if row["use_avatar"] else row["thumbnail_url"])
-    await interaction.response.defer(ephemeral=True)
-    await interaction.channel.send(embed=embed)
-
-
-@bot.tree.command(name="embededit", description="Edit a saved embed")
-@app_commands.describe(name="Name of the embed to edit")
-async def embededit(interaction: discord.Interaction, name: str):
-    guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
-    row = cur.fetchone()
-    conn.close()
-    
-    if not row:
-        await interaction.response.send_message(f"No embed named **{name}**.", ephemeral=True)
-        return
-    
-    prefill = {"embed_title": row["embed_title"], "description": row["description"], "theme": row["theme"], "image_url": row["image_url"], "thumbnail_url": row["thumbnail_url"]}
-    await interaction.response.send_modal(EmbedModal(use_avatar=bool(row["use_avatar"]), save_name=name, is_edit=True, prefill=prefill))
-
-
-@bot.tree.command(name="embedchannel", description="Set which channel a saved embed posts to")
-@app_commands.describe(name="Name of the embed", channel="Channel to post it in")
-async def embedchannel(interaction: discord.Interaction, name: str, channel: discord.TextChannel):
-    guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
-    row = cur.fetchone()
-    
-    if not row:
-        conn.close()
-        await interaction.response.send_message(f"No embed named **{name}**.", ephemeral=True)
-        return
-    
-    cur.execute("UPDATE saved_embeds SET post_channel_id = ? WHERE guild_id = ? AND name = ?", (channel.id, guild.id, name))
-    conn.commit()
-    conn.close()
-    
-    await interaction.response.send_message(f"{CHECK} **{name}** will post to {channel.mention}.", ephemeral=True)
-
-
-@bot.tree.command(name="embeddelete", description="Delete a saved embed")
-@app_commands.describe(name="Name of the embed to delete")
-async def embeddelete(interaction: discord.Interaction, name: str):
-    guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
-    deleted = cur.rowcount
-    conn.commit()
-    conn.close()
-    
-    msg = f"🗑️ Deleted **{name}**." if deleted else f"No embed named **{name}**."
-    await interaction.response.send_message(msg, ephemeral=True)
-
-
-# ———————————————––
-# Commands — Embed Collections (post several saved embeds at once)
-# ———————————————––
-
-def _parse_embed_names(embeds: str) -> list[str]:
-    return [e.strip() for e in embeds.split(",") if e.strip()]
-
-
-async def _missing_embed_names(guild_id: int, names: list[str]) -> list[str]:
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(f"SELECT name FROM saved_embeds WHERE guild_id = ? AND name IN ({','.join('?' * len(names))})", (guild_id, *names))
-    existing = {row["name"] for row in cur.fetchall()}
-    conn.close()
-    return [n for n in names if n not in existing]
-
-
-embedcollection_group = app_commands.Group(name="embedcollection", description="Post several saved embeds together with one command")
-
-@embedcollection_group.command(name="create", description="Create a collection of saved embeds to post together")
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(name="Name for this collection", embeds="Saved embed names, comma-separated, in post order (e.g. banner, models, uploads)")
-async def embedcollection_create(interaction: discord.Interaction, name: str, embeds: str):
-    guild = guild_only(interaction)
-    embed_names = _parse_embed_names(embeds)
-    if not embed_names:
-        await interaction.response.send_message("❌ Provide at least one saved embed name.", ephemeral=True)
-        return
-
-    missing = await _missing_embed_names(guild.id, embed_names)
-    if missing:
-        await interaction.response.send_message(f"❌ No saved embed(s) named: {', '.join(missing)}. Check `/embedlist`.", ephemeral=True)
-        return
-
-    now = datetime.now(timezone.utc).isoformat()
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM embed_collections WHERE guild_id = ? AND name = ?", (guild.id, name))
-    if cur.fetchone():
-        conn.close()
-        await interaction.response.send_message(f"❌ A collection named **{name}** already exists! Use `/embedcollection edit` to change it.", ephemeral=True)
-        return
-
-    cur.execute(
-        "INSERT INTO embed_collections (guild_id, name, embed_names, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-        (guild.id, name, json.dumps(embed_names), now, now),
-    )
-    conn.commit()
-    conn.close()
-    await interaction.response.send_message(f"{CHECK} Collection **{name}** created with: {', '.join(embed_names)}\nUse `/embedcollection post name:{name}` to post them all.", ephemeral=True)
-
-
-@embedcollection_group.command(name="post", description="Post every embed in a collection, in order")
-@app_commands.describe(name="Name of the collection")
-async def embedcollection_post(interaction: discord.Interaction, name: str):
-    guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT embed_names FROM embed_collections WHERE guild_id = ? AND name = ?", (guild.id, name))
-    row = cur.fetchone()
-    conn.close()
-
-    if not row:
-        await interaction.response.send_message(f"No collection named **{name}**. Use `/embedcollection list`.", ephemeral=True)
-        return
-
-    embed_names = json.loads(row["embed_names"])
-    await interaction.response.defer(ephemeral=True)
-
-    conn = get_db()
-    cur = conn.cursor()
-    posted, missing, built = [], [], []
-    for embed_name in embed_names:
-        cur.execute("SELECT * FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, embed_name))
-        saved = cur.fetchone()
-        if not saved:
-            missing.append(embed_name)
-            continue
-        embed = build_embed(
-            title=saved["embed_title"],
-            description=saved["description"] or "\u200b",
-            theme=saved["theme"] or "pink",
-            image=saved["image_url"],
-            thumbnail=None if saved["use_avatar"] else saved["thumbnail_url"],
-        )
-        built.append(embed)
-        posted.append(embed_name)
-    conn.close()
-
-    # Discord allows up to 10 embeds per message, so batch them instead of
-    # sending one message per embed (fewer API calls, no rate-limit risk,
-    # and they land as one grouped post instead of a spammy chain).
-    for i in range(0, len(built), 10):
-        await interaction.channel.send(embeds=built[i:i + 10])
-
-    msg = f"{CHECK} Posted: {', '.join(posted)}"
-    if missing:
-        msg += f"\n⚠️ Skipped (no longer saved): {', '.join(missing)}"
-    await interaction.followup.send(msg, ephemeral=True)
-
-
-@embedcollection_group.command(name="edit", description="Replace the embed list in a collection")
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(name="Name of the collection to edit", embeds="New saved embed names, comma-separated, in post order")
-async def embedcollection_edit(interaction: discord.Interaction, name: str, embeds: str):
-    guild = guild_only(interaction)
-    embed_names = _parse_embed_names(embeds)
-    if not embed_names:
-        await interaction.response.send_message("❌ Provide at least one saved embed name.", ephemeral=True)
-        return
-
-    missing = await _missing_embed_names(guild.id, embed_names)
-    if missing:
-        await interaction.response.send_message(f"❌ No saved embed(s) named: {', '.join(missing)}. Check `/embedlist`.", ephemeral=True)
-        return
-
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM embed_collections WHERE guild_id = ? AND name = ?", (guild.id, name))
-    if not cur.fetchone():
-        conn.close()
-        await interaction.response.send_message(f"No collection named **{name}**.", ephemeral=True)
-        return
-
-    now = datetime.now(timezone.utc).isoformat()
-    cur.execute("UPDATE embed_collections SET embed_names = ?, updated_at = ? WHERE guild_id = ? AND name = ?", (json.dumps(embed_names), now, guild.id, name))
-    conn.commit()
-    conn.close()
-    await interaction.response.send_message(f"{CHECK} Collection **{name}** updated to: {', '.join(embed_names)}", ephemeral=True)
-
-
-@embedcollection_group.command(name="add", description="Add one saved embed to the end of a collection")
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(name="Name of the collection", embed="Saved embed name to append")
-async def embedcollection_add(interaction: discord.Interaction, name: str, embed: str):
-    guild = guild_only(interaction)
-    missing = await _missing_embed_names(guild.id, [embed])
-    if missing:
-        await interaction.response.send_message(f"❌ No saved embed named **{embed}**. Check `/embedlist`.", ephemeral=True)
-        return
-
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT embed_names FROM embed_collections WHERE guild_id = ? AND name = ?", (guild.id, name))
-    row = cur.fetchone()
-    if not row:
-        conn.close()
-        await interaction.response.send_message(f"No collection named **{name}**.", ephemeral=True)
-        return
-
-    embed_names = json.loads(row["embed_names"])
-    if embed in embed_names:
-        conn.close()
-        await interaction.response.send_message(f"**{embed}** is already in **{name}**.", ephemeral=True)
-        return
-
-    embed_names.append(embed)
-    now = datetime.now(timezone.utc).isoformat()
-    cur.execute("UPDATE embed_collections SET embed_names = ?, updated_at = ? WHERE guild_id = ? AND name = ?", (json.dumps(embed_names), now, guild.id, name))
-    conn.commit()
-    conn.close()
-    await interaction.response.send_message(f"{CHECK} Added **{embed}** to **{name}**. Order now: {', '.join(embed_names)}", ephemeral=True)
-
-
-@embedcollection_group.command(name="remove", description="Remove one saved embed from a collection")
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(name="Name of the collection", embed="Saved embed name to remove")
-async def embedcollection_remove(interaction: discord.Interaction, name: str, embed: str):
-    guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT embed_names FROM embed_collections WHERE guild_id = ? AND name = ?", (guild.id, name))
-    row = cur.fetchone()
-    if not row:
-        conn.close()
-        await interaction.response.send_message(f"No collection named **{name}**.", ephemeral=True)
-        return
-
-    embed_names = json.loads(row["embed_names"])
-    if embed not in embed_names:
-        conn.close()
-        await interaction.response.send_message(f"**{embed}** isn't in **{name}**.", ephemeral=True)
-        return
-
-    embed_names.remove(embed)
-    now = datetime.now(timezone.utc).isoformat()
-    cur.execute("UPDATE embed_collections SET embed_names = ?, updated_at = ? WHERE guild_id = ? AND name = ?", (json.dumps(embed_names), now, guild.id, name))
-    conn.commit()
-    conn.close()
-    remaining = ', '.join(embed_names) if embed_names else "*(empty)*"
-    await interaction.response.send_message(f"{CHECK} Removed **{embed}** from **{name}**. Remaining: {remaining}", ephemeral=True)
-
-
-@embedcollection_group.command(name="list", description="List all embed collections")
-async def embedcollection_list(interaction: discord.Interaction):
-    guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT name, embed_names, updated_at FROM embed_collections WHERE guild_id = ? ORDER BY name", (guild.id,))
-    rows = cur.fetchall()
-    conn.close()
-
-    if not rows:
-        await interaction.response.send_message("No collections yet. Use `/embedcollection create`.", ephemeral=True)
-        return
-
-    embed = discord.Embed(title="📚 Embed Collections", color=get_theme_color("pink"))
-    for row in rows:
-        names = json.loads(row["embed_names"])
-        embed.add_field(name=f"• {row['name']}", value=f"{' → '.join(names)}\nUpdated: {row['updated_at'][:10]}", inline=False)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-@embedcollection_group.command(name="delete", description="Delete a collection (the saved embeds themselves are untouched)")
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(name="Name of the collection to delete")
-async def embedcollection_delete(interaction: discord.Interaction, name: str):
-    guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM embed_collections WHERE guild_id = ? AND name = ?", (guild.id, name))
-    deleted = cur.rowcount
-    conn.commit()
-    conn.close()
-    msg = f"🗑️ Deleted collection **{name}**." if deleted else f"No collection named **{name}**."
-    await interaction.response.send_message(msg, ephemeral=True)
-
-
-bot.tree.add_command(embedcollection_group)
-
-
-# ———————————————––
 # Commands — Welcome
 # ———————————————––
 
@@ -1929,7 +1554,7 @@ async def welcome_setup(interaction: discord.Interaction, welcome_channel: disco
         kwargs["welcome_banner2_url"] = banner2_url
     if outside_text is not None:
         kwargs["welcome_outside_text"] = outside_text.replace("\\n", "\n")
-    
+
     upsert_settings(guild.id, **kwargs)
     thumb = thumbnail_url or None
     preview_title = title.replace("{mention}", interaction.user.mention) if title else None
@@ -1952,7 +1577,7 @@ async def welcome_edit(interaction: discord.Interaction, welcome_text: str | Non
     if not settings or not settings["welcome_channel_id"]:
         await interaction.response.send_message("Run `/welcome_setup` first.", ephemeral=True)
         return
-    
+
     kwargs = {}
     if welcome_text:
         kwargs["welcome_text"] = welcome_text
@@ -1968,11 +1593,11 @@ async def welcome_edit(interaction: discord.Interaction, welcome_text: str | Non
         kwargs["welcome_banner2_url"] = "" if banner2_url.lower() == "none" else banner2_url
     if outside_text is not None:
         kwargs["welcome_outside_text"] = "" if outside_text.lower() == "none" else outside_text.replace("\\n", "\n")
-    
+
     if not kwargs:
         await interaction.response.send_message("Provide at least one field to update.", ephemeral=True)
         return
-    
+
     upsert_settings(guild.id, **kwargs)
     updated = get_settings(guild.id)
     thumb = updated["welcome_thumbnail_url"] if updated["welcome_thumbnail_url"] else None
@@ -2003,7 +1628,7 @@ async def welcome_test(interaction: discord.Interaction):
     if not settings or not settings["welcome_channel_id"]:
         await interaction.response.send_message("Run `/welcome_setup` first.", ephemeral=True)
         return
-    
+
     description = (settings["welcome_text"] or "Welcome {mention}!").replace("{mention}", interaction.user.mention)
     title = settings["welcome_title"] if settings["welcome_title"] else None
     if title:
@@ -2054,7 +1679,7 @@ async def set_boost_message(interaction: discord.Interaction, message: str, outs
         updates["boost_banner2_url"] = banner2_url
     if thumbnail:
         updates["boost_thumbnail_url"] = thumbnail
-    
+
     upsert_settings(guild.id, **updates)
     thumb = thumbnail or None
     preview_text = message.replace("\\n", "\n").replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
@@ -2132,7 +1757,7 @@ async def test_boost(interaction: discord.Interaction):
     if not settings or not settings["boost_channel_id"]:
         await interaction.response.send_message("Run `/set_boost_channel` first.", ephemeral=True)
         return
-    
+
     text = (settings["boost_text"] or "thank you {mention} for boosting! ♡").replace("{mention}", interaction.user.mention).replace("{username}", interaction.user.name).replace("{server}", guild.name)
     outside_text = settings["boost_outside_text"] if settings["boost_outside_text"] else None
     if outside_text:
@@ -2179,7 +1804,7 @@ async def verify_message(interaction: discord.Interaction, title: str | None = N
     title = clean_input(title)
     image = clean_input(image)
     thumbnail = clean_input(thumbnail)
-    
+
     if title is not None:
         updates["verify_title"] = title
     if description is not None:
@@ -2194,14 +1819,14 @@ async def verify_message(interaction: discord.Interaction, title: str | None = N
         label, emoji = parse_button(button)
         updates["verify_button_label"] = label
         updates["verify_button_emoji"] = emoji
-    
+
     upsert_settings(guild.id, **updates)
     row = get_settings(guild.id)
     embed = build_embed(title=row["verify_title"], description=(row["verify_description"] or "Click the button below to verify!").replace("\\n", "\n"), theme=row["verify_color"] or "pink", image=row["verify_image_url"], thumbnail=row["verify_thumbnail_url"])
     view = VerifyView(button_label=row["verify_button_label"], button_emoji=parse_emoji(row["verify_button_emoji"]))
     channel_id = row["verify_channel_id"] or interaction.channel.id
     channel = guild.get_channel(int(channel_id))
-    
+
     await interaction.response.defer(ephemeral=True)
     if row["verify_message_id"]:
         try:
@@ -2209,7 +1834,7 @@ async def verify_message(interaction: discord.Interaction, title: str | None = N
             await old_msg.delete()
         except Exception:
             pass
-    
+
     new_msg = await channel.send(embed=embed, view=view)
     upsert_settings(guild.id, verify_message_id=str(new_msg.id))
     await interaction.followup.send(f"{CHECK} Verify message updated in {channel.mention}", ephemeral=True)
@@ -2234,11 +1859,11 @@ async def verify_responses(interaction: discord.Interaction, success_message: st
         updates["verify_success_message"] = success_message
     if already_verified_message:
         updates["verify_already_message"] = already_verified_message
-    
+
     if not updates:
         await interaction.response.send_message("Provide at least one field.", ephemeral=True)
         return
-    
+
     upsert_settings(guild.id, **updates)
     await interaction.response.send_message(f"{CHECK} Verify responses updated!", ephemeral=True)
 
@@ -2462,11 +2087,11 @@ async def sticky_view(interaction: discord.Interaction):
     cur.execute("SELECT message FROM sticky_messages WHERE guild_id = ? AND channel_id = ?", (guild.id, interaction.channel_id))
     row = cur.fetchone()
     conn.close()
-    
+
     if not row:
         await interaction.response.send_message("No sticky message set for this channel.", ephemeral=True)
         return
-    
+
     await interaction.response.send_message(row["message"].replace("\\n", "\n"), ephemeral=True)
 
 
@@ -2483,7 +2108,7 @@ async def autoresponder_add(interaction: discord.Interaction, trigger: str, mess
     trigger = trigger.lower().strip().lstrip(".")
     conn = get_db()
     cur = conn.cursor()
-    
+
     try:
         cur.execute("INSERT INTO autoresponders (guild_id, trigger, message, match_type) VALUES (?, ?, ?, ?)", (guild.id, trigger, message, match_type))
         conn.commit()
@@ -2505,18 +2130,18 @@ async def autoresponder_edit(interaction: discord.Interaction, trigger: str, mes
     cur = conn.cursor()
     cur.execute("SELECT * FROM autoresponders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
     row = cur.fetchone()
-    
+
     if not row:
         conn.close()
         await interaction.response.send_message(f"No autoresponder `{trigger}` found.", ephemeral=True)
         return
-    
+
     final_message = message if message is not None else row["message"]
     final_match = match_type if match_type is not None else (row["match_type"] or "exact")
     cur.execute("UPDATE autoresponders SET message = ?, match_type = ? WHERE guild_id = ? AND trigger = ?", (final_message, final_match, guild.id, trigger))
     conn.commit()
     conn.close()
-    
+
     await interaction.response.send_message(f"{CHECK} Autoresponder `{trigger}` updated! (match: {final_match})", ephemeral=True)
 
 
@@ -2532,7 +2157,7 @@ async def autoresponder_remove(interaction: discord.Interaction, trigger: str):
     deleted = cur.rowcount
     conn.commit()
     conn.close()
-    
+
     msg = f"🗑️ Autoresponder `{trigger}` deleted." if deleted else f"No autoresponder `{trigger}` found."
     await interaction.response.send_message(msg, ephemeral=True)
 
@@ -2546,28 +2171,29 @@ async def autoresponder_list(interaction: discord.Interaction):
     cur.execute("SELECT trigger, message, match_type FROM autoresponders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
     rows = cur.fetchall()
     conn.close()
-    
+
     if not rows:
         await interaction.response.send_message("No autoresponders set up yet.", ephemeral=True)
         return
-    
+
     embed = discord.Embed(title="⚡ Autoresponders", color=get_theme_color("pink"))
     for row in rows:
         preview = row["message"][:60] + ("..." if len(row["message"]) > 60 else "")
         embed.add_field(name=f"`{row['trigger']}` — {row['match_type'] or 'exact'}", value=preview, inline=False)
-    
+
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ———————————————––
-# Commands — Image Responder
+# Commands — Image Responder (also replaces the old saved-embed commands)
 # ———————————————––
 
-@bot.tree.command(name="imageresponder_add", description="Post an image when a keyword is triggered (as an embed or a plain image)")
+@bot.tree.command(name="imageresponder_add", description="Post an embed or image when a keyword is triggered")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
     trigger="Keyword (no leading dot needed — with 'exact' match people type .keyword)",
-    image_url="Image / gif URL",
+    image_url="Image / gif URL (optional if you give a title or caption)",
+    title="Embed title (embed mode only)",
     caption="Caption text (embed description, or text above the image if not an embed)",
     match_type="Match type",
     as_embed="True = post inside an embed (default). False = post the plain image with no embed box",
@@ -2578,49 +2204,52 @@ async def autoresponder_list(interaction: discord.Interaction):
     image_url2="Optional 2nd image, posted as its own embed right after the first (embed mode only)",
 )
 @app_commands.choices(match_type=[app_commands.Choice(name="exact", value="exact"), app_commands.Choice(name="anywhere", value="anywhere")])
-async def imageresponder_add(interaction: discord.Interaction, trigger: str, image_url: str, caption: str | None = None, match_type: str = "exact", as_embed: bool = True, color: str = "pink", thumbnail_url: str | None = None, footer: str | None = None, footer_icon: str | None = None, image_url2: str | None = None):
+async def imageresponder_add(interaction: discord.Interaction, trigger: str, image_url: str | None = None, title: str | None = None, caption: str | None = None, match_type: str = "exact", as_embed: bool = True, color: str = "pink", thumbnail_url: str | None = None, footer: str | None = None, footer_icon: str | None = None, image_url2: str | None = None):
     guild = guild_only(interaction)
     # Strip a leading "." so ".hello" and "hello" are stored the same way —
     # exact matching already adds the dot itself (see check_trigger), so a
     # stored ".hello" could never match anything.
     trigger = trigger.lower().strip().lstrip(".")
+    if not trigger:
+        await interaction.response.send_message("❌ Give me a trigger keyword.", ephemeral=True)
+        return
+    if not (image_url or title or caption):
+        await interaction.response.send_message("❌ Give me at least an image URL, a title, or a caption.", ephemeral=True)
+        return
+
+    caption = caption.replace("\\n", "\n") if caption else caption
     footer_icon_url = resolve_icon_url(footer_icon)
     conn = get_db()
     cur = conn.cursor()
-    
+
     try:
         cur.execute(
-            "INSERT INTO image_responders (guild_id, trigger, image_url, caption, match_type, color, thumbnail_url, footer, footer_icon, as_embed, image_url2) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (guild.id, trigger, image_url, caption, match_type, color or "pink", thumbnail_url, footer, footer_icon_url, 1 if as_embed else 0, image_url2),
+            "INSERT INTO image_responders (guild_id, trigger, image_url, caption, match_type, color, thumbnail_url, footer, footer_icon, as_embed, image_url2, title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (guild.id, trigger, image_url or "", caption, match_type, color or "pink", thumbnail_url, footer, footer_icon_url, 1 if as_embed else 0, image_url2, title),
         )
         conn.commit()
-        header = f"{CHECK} Image responder `{trigger}` created! (match: {match_type}, {'embed' if as_embed else 'plain image'})"
-        if as_embed:
-            preview = build_embed(title=None, description=caption or None, theme=color or "pink", image=image_url, thumbnail=thumbnail_url, footer=footer or None, footer_icon=footer_icon_url)
-            if image_url2:
-                preview2 = build_embed(title=None, description=None, theme=color or "pink", image=image_url2)
-                await interaction.response.send_message(header, embeds=[preview, preview2], ephemeral=True)
-            else:
-                await interaction.response.send_message(header, embed=preview, ephemeral=True)
-        else:
-            await interaction.response.defer(ephemeral=True)
-            file = await fetch_image_file(image_url)
-            if file:
-                await interaction.followup.send(f"{header}\n{caption or ''}".strip(), file=file, ephemeral=True)
-            else:
-                await interaction.followup.send(f"{header}\n{build_plain_image_content(caption, image_url)}", ephemeral=True)
     except sqlite3.IntegrityError:
-        await interaction.response.send_message(f"❌ Trigger `{trigger}` already exists.", ephemeral=True)
+        await interaction.response.send_message(f"❌ Trigger `{trigger}` already exists. Use `/imageresponder_edit {trigger}` to change it.", ephemeral=True)
+        return
     finally:
         conn.close()
+
+    header = f"{CHECK} Image responder `{trigger}` created! (match: {match_type}, {'embed' if as_embed else 'plain image'})"
+    await send_responder_preview(
+        interaction, header,
+        title=title, caption=caption, image_url=image_url, image_url2=image_url2,
+        color=color, thumbnail_url=thumbnail_url, footer=footer, footer_icon=footer_icon_url,
+        as_embed=as_embed,
+    )
 
 
 @bot.tree.command(name="imageresponder_edit", description="Edit an image responder")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
     trigger="Trigger to edit",
-    image_url="New image / gif URL",
-    caption="New caption",
+    image_url="New image / gif URL ('none' to remove)",
+    title="New embed title ('none' to remove)",
+    caption="New caption ('none' to remove)",
     match_type="New match type",
     as_embed="True = embed, False = plain image with no embed box",
     color="New embed color — theme name or hex ('none' clears back to pink)",
@@ -2630,21 +2259,31 @@ async def imageresponder_add(interaction: discord.Interaction, trigger: str, ima
     image_url2="New 2nd image URL, posted as its own embed after the first ('none' to remove, embed mode only)",
 )
 @app_commands.choices(match_type=[app_commands.Choice(name="exact", value="exact"), app_commands.Choice(name="anywhere", value="anywhere")])
-async def imageresponder_edit(interaction: discord.Interaction, trigger: str, image_url: str | None = None, caption: str | None = None, match_type: str | None = None, as_embed: bool | None = None, color: str | None = None, thumbnail_url: str | None = None, footer: str | None = None, footer_icon: str | None = None, image_url2: str | None = None):
+async def imageresponder_edit(interaction: discord.Interaction, trigger: str, image_url: str | None = None, title: str | None = None, caption: str | None = None, match_type: str | None = None, as_embed: bool | None = None, color: str | None = None, thumbnail_url: str | None = None, footer: str | None = None, footer_icon: str | None = None, image_url2: str | None = None):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip().lstrip(".")
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT * FROM image_responders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
     row = cur.fetchone()
-    
+
     if not row:
         conn.close()
         await interaction.response.send_message(f"No image responder `{trigger}` found.", ephemeral=True)
         return
-    
-    final_image = image_url if image_url is not None else row["image_url"]
-    final_caption = caption if caption is not None else row["caption"]
+
+    if image_url is None:
+        final_image = row["image_url"] or ""
+    else:
+        final_image = "" if image_url.lower() == "none" else image_url
+    if title is None:
+        final_title = row["title"]
+    else:
+        final_title = None if title.lower() == "none" else title
+    if caption is None:
+        final_caption = row["caption"]
+    else:
+        final_caption = None if caption.lower() == "none" else caption.replace("\\n", "\n")
     final_match = match_type if match_type is not None else (row["match_type"] or "exact")
     if as_embed is None:
         final_as_embed = 0 if row["as_embed"] == 0 else 1
@@ -2667,28 +2306,26 @@ async def imageresponder_edit(interaction: discord.Interaction, trigger: str, im
         final_image_url2 = row["image_url2"]
     else:
         final_image_url2 = None if image_url2.lower() == "none" else image_url2
+
+    if not (final_image or final_title or final_caption):
+        conn.close()
+        await interaction.response.send_message("❌ That would leave the responder empty — it needs at least an image, a title, or a caption.", ephemeral=True)
+        return
+
     cur.execute(
-        "UPDATE image_responders SET image_url = ?, caption = ?, match_type = ?, as_embed = ?, color = ?, thumbnail_url = ?, footer = ?, footer_icon = ?, image_url2 = ? WHERE guild_id = ? AND trigger = ?",
-        (final_image, final_caption, final_match, final_as_embed, final_color, final_thumbnail, final_footer, final_footer_icon, final_image_url2, guild.id, trigger),
+        "UPDATE image_responders SET image_url = ?, title = ?, caption = ?, match_type = ?, as_embed = ?, color = ?, thumbnail_url = ?, footer = ?, footer_icon = ?, image_url2 = ? WHERE guild_id = ? AND trigger = ?",
+        (final_image, final_title, final_caption, final_match, final_as_embed, final_color, final_thumbnail, final_footer, final_footer_icon, final_image_url2, guild.id, trigger),
     )
     conn.commit()
     conn.close()
-    
+
     header = f"{CHECK} Image responder `{trigger}` updated! (match: {final_match}, {'embed' if final_as_embed else 'plain image'})"
-    if final_as_embed:
-        preview = build_embed(title=None, description=final_caption or None, theme=final_color, image=final_image, thumbnail=final_thumbnail, footer=final_footer, footer_icon=final_footer_icon)
-        if final_image_url2:
-            preview2 = build_embed(title=None, description=None, theme=final_color, image=final_image_url2)
-            await interaction.response.send_message(header, embeds=[preview, preview2], ephemeral=True)
-        else:
-            await interaction.response.send_message(header, embed=preview, ephemeral=True)
-    else:
-        await interaction.response.defer(ephemeral=True)
-        file = await fetch_image_file(final_image)
-        if file:
-            await interaction.followup.send(f"{header}\n{final_caption or ''}".strip(), file=file, ephemeral=True)
-        else:
-            await interaction.followup.send(f"{header}\n{build_plain_image_content(final_caption, final_image)}", ephemeral=True)
+    await send_responder_preview(
+        interaction, header,
+        title=final_title, caption=final_caption, image_url=final_image, image_url2=final_image_url2,
+        color=final_color, thumbnail_url=final_thumbnail, footer=final_footer, footer_icon=final_footer_icon,
+        as_embed=bool(final_as_embed),
+    )
 
 
 @bot.tree.command(name="imageresponder_remove", description="Delete an image responder")
@@ -2703,7 +2340,7 @@ async def imageresponder_remove(interaction: discord.Interaction, trigger: str):
     deleted = cur.rowcount
     conn.commit()
     conn.close()
-    
+
     msg = f"🗑️ Image responder `{trigger}` deleted." if deleted else f"No image responder `{trigger}` found."
     await interaction.response.send_message(msg, ephemeral=True)
 
@@ -2714,29 +2351,41 @@ async def imageresponder_list(interaction: discord.Interaction):
     guild = guild_only(interaction)
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT trigger, image_url, image_url2, caption, match_type, color, thumbnail_url, footer, as_embed FROM image_responders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
+    cur.execute("SELECT * FROM image_responders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
     rows = cur.fetchall()
     conn.close()
-    
+
     if not rows:
         await interaction.response.send_message("No image responders set up yet.", ephemeral=True)
         return
-    
-    embed = discord.Embed(title="🖼️ Image Responders", color=get_theme_color("pink"))
-    for row in rows:
-        is_embed = row["as_embed"] != 0
-        caption_text = f"\nCaption: {row['caption']}" if row["caption"] else ""
-        mode_text = f"\nMode: {'embed' if is_embed else 'plain image'}"
-        if is_embed:
-            thumb_text = f"\nSide image: [link]({row['thumbnail_url']})" if row["thumbnail_url"] else ""
-            color_text = f"\nColor: {row['color'] or 'pink'}"
-            footer_text = f"\nFooter: {row['footer']}" if row["footer"] else ""
-            image2_text = f"\n2nd image: [link]({row['image_url2']})" if row["image_url2"] else ""
-        else:
-            thumb_text = color_text = footer_text = image2_text = ""
-        embed.add_field(name=f"`{row['trigger']}` — {row['match_type'] or 'exact'}", value=f"[image]({row['image_url']}){caption_text}{mode_text}{color_text}{thumb_text}{footer_text}{image2_text}", inline=False)
-    
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # Discord embeds cap out at 25 fields each, so paginate into chunks of 25
+    chunks = [rows[i:i + 25] for i in range(0, len(rows), 25)]
+    embeds = []
+    for idx, chunk in enumerate(chunks, start=1):
+        page_title = f"🖼️ Image Responders (page {idx}/{len(chunks)})" if len(chunks) > 1 else "🖼️ Image Responders"
+        embed = discord.Embed(title=page_title, color=get_theme_color("pink"))
+        for row in chunk:
+            is_embed = row["as_embed"] != 0
+            title_text = f"\nTitle: {row['title']}" if is_embed and row["title"] else ""
+            image_text = f"[image]({row['image_url']})" if row["image_url"] else "*(no image)*"
+            caption_text = f"\nCaption: {row['caption'][:100]}" if row["caption"] else ""
+            mode_text = f"\nMode: {'embed' if is_embed else 'plain image'}"
+            if is_embed:
+                thumb_text = f"\nSide image: [link]({row['thumbnail_url']})" if row["thumbnail_url"] else ""
+                color_text = f"\nColor: {row['color'] or 'pink'}"
+                footer_text = f"\nFooter: {row['footer']}" if row["footer"] else ""
+                image2_text = f"\n2nd image: [link]({row['image_url2']})" if row["image_url2"] else ""
+            else:
+                thumb_text = color_text = footer_text = image2_text = ""
+            value = f"{image_text}{title_text}{caption_text}{mode_text}{color_text}{thumb_text}{footer_text}{image2_text}"
+            embed.add_field(name=f"`{row['trigger']}` — {row['match_type'] or 'exact'}", value=value[:1024], inline=False)
+        embeds.append(embed)
+
+    # Discord also caps messages at 10 embeds each, so batch those too
+    await interaction.response.send_message(embeds=embeds[:10], ephemeral=True)
+    for i in range(10, len(embeds), 10):
+        await interaction.followup.send(embeds=embeds[i:i + 10], ephemeral=True)
 
 
 # ———————————————––
@@ -2791,7 +2440,7 @@ async def waitlist_create(interaction: discord.Interaction, title: str | None = 
     if not interaction.guild:
         await interaction.response.send_message("Server only.", ephemeral=True)
         return
-    
+
     data = load_waitlists()
     key = get_waitlist_key(interaction.guild.id)
     final_title = title or f"{interaction.guild.name}'s waitlist"
@@ -2810,12 +2459,12 @@ async def waitlist_add(interaction: discord.Interaction, channel: discord.TextCh
     if key not in data:
         await interaction.response.send_message("Run /waitlist_create first.", ephemeral=True)
         return
-    
+
     cid = str(channel.id)
     if any(entry_id(e) == cid for e in data[key]["users"]):
         await interaction.response.send_message("That channel is already in the waitlist.", ephemeral=True)
         return
-    
+
     entry = build_entry(cid, label, user.id if user else None)
     data[key]["users"].append(entry)
     save_waitlists(data)
@@ -2855,7 +2504,7 @@ async def waitlist_label(interaction: discord.Interaction, channel: discord.Text
     if key not in data:
         await interaction.response.send_message("No waitlist found. Run /waitlist_create first.", ephemeral=True)
         return
-    
+
     cid = str(channel.id)
     entries = data[key]["users"]
     for i, e in enumerate(entries):
@@ -2866,7 +2515,7 @@ async def waitlist_label(interaction: discord.Interaction, channel: discord.Text
             msg = f"{CHECK} Updated label for {channel.mention} → **{label}**" if label else f"{CHECK} Cleared label for {channel.mention}"
             await interaction.response.send_message(msg, ephemeral=True)
             return
-    
+
     await interaction.response.send_message(f"{channel.mention} isn't in the waitlist.", ephemeral=True)
 
 
@@ -2878,7 +2527,7 @@ async def waitlist_remove(interaction: discord.Interaction):
     if key not in data or not data[key]["users"]:
         await interaction.response.send_message("The waitlist is empty.", ephemeral=True)
         return
-    
+
     view = WaitlistRemoveView(interaction.guild, data[key]["users"])
     await interaction.response.send_message("Select a channel to remove:", view=view, ephemeral=True)
 
@@ -2924,12 +2573,12 @@ async def waitlist_move(interaction: discord.Interaction):
     if key not in data or not data[key]["users"]:
         await interaction.response.send_message("The waitlist is empty.", ephemeral=True)
         return
-    
+
     entries = data[key]["users"]
     if len(entries) < 2:
         await interaction.response.send_message("Only one entry — nothing to reorder.", ephemeral=True)
         return
-    
+
     view = WaitlistMovePickView(entries, interaction.guild)
     await interaction.response.send_message("Pick an entry to move:", view=view, ephemeral=True)
 
@@ -3122,7 +2771,7 @@ async def role_add(interaction: discord.Interaction, user: discord.Member, role:
     if role in user.roles:
         await interaction.response.send_message(f"❌ {user.mention} already has {role.mention}.", ephemeral=True)
         return
-    
+
     try:
         await user.add_roles(role)
         await interaction.response.send_message(f"{CHECK} Added {role.mention} to {user.mention}.")
@@ -3138,7 +2787,7 @@ async def role_remove(interaction: discord.Interaction, user: discord.Member, ro
     if role not in user.roles:
         await interaction.response.send_message(f"❌ {user.mention} doesn't have {role.mention}.", ephemeral=True)
         return
-    
+
     try:
         await user.remove_roles(role)
         await interaction.response.send_message(f"{CHECK} Removed {role.mention} from {user.mention}.")
@@ -3274,7 +2923,7 @@ async def roblox_calctax(interaction: discord.Interaction, amount: int, discount
         embed.add_field(name="After 10% discount", value=f"{display_amount} <:001_roblox_DNS:1501267296511856712>", inline=False)
     else:
         embed.add_field(name="Initial amount", value=f"{amount} <:001_roblox_DNS:1501267296511856712>", inline=False)
-    
+
     embed.add_field(name="After Roblox tax (30%)", value=f"{after_tax} <:001_roblox_DNS:1501267296511856712>", inline=False)
     embed.add_field(name="Total cost to cover tax", value=f"{to_cover_tax} <:001_roblox_DNS:1501267296511856712>", inline=False)
 
@@ -3296,16 +2945,16 @@ emoji_group = app_commands.Group(name="emoji", description="Emoji management")
 async def emoji_steal(interaction: discord.Interaction, emoji: str, name: str | None = None):
     guild = guild_only(interaction)
     await interaction.response.defer(ephemeral=True)
-    
+
     custom_match = re.match(r'<a?:(\w+):(\d+)>', emoji)
     if not custom_match:
         await interaction.followup.send("❌ Please use a custom emoji.", ephemeral=True)
         return
-    
+
     emoji_name = name or custom_match.group(1)
     emoji_id = custom_match.group(2)
     emoji_url = f"https://cdn.discordapp.com/emojis/{emoji_id}.{'gif' if emoji.startswith('<a:') else 'png'}"
-    
+
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(emoji_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
@@ -3313,7 +2962,7 @@ async def emoji_steal(interaction: discord.Interaction, emoji: str, name: str | 
                     await interaction.followup.send("❌ Couldn't download the emoji.", ephemeral=True)
                     return
                 emoji_data = await resp.read()
-        
+
         created_emoji = await guild.create_custom_emoji(name=emoji_name, image=emoji_data)
         await interaction.followup.send(f"{CHECK} Emoji stolen! {created_emoji} `{created_emoji.name}`", ephemeral=True)
     except discord.Forbidden:
@@ -3337,15 +2986,15 @@ sticker_group = app_commands.Group(name="sticker", description="Sticker manageme
 async def sticker_steal(interaction: discord.Interaction, sticker_id: str, name: str | None = None):
     guild = guild_only(interaction)
     await interaction.response.defer(ephemeral=True)
-    
+
     try:
         sticker = await bot.fetch_sticker(int(sticker_id))
     except (ValueError, discord.NotFound):
         await interaction.followup.send("❌ Sticker not found.", ephemeral=True)
         return
-    
+
     sticker_name = name or sticker.name
-    
+
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(sticker.url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
@@ -3353,7 +3002,7 @@ async def sticker_steal(interaction: discord.Interaction, sticker_id: str, name:
                     await interaction.followup.send("❌ Couldn't download the sticker.", ephemeral=True)
                     return
                 sticker_data = await resp.read()
-        
+
         created_sticker = await guild.create_sticker(
             name=sticker_name,
             description=f"Stolen from {sticker.guild.name}" if sticker.guild else "Imported sticker",
