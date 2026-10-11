@@ -3211,6 +3211,66 @@ async def showcase_command(interaction: discord.Interaction, image: discord.Atta
 
 
 # ———————————————––
+# Commands — Price
+# ———————————————––
+
+ROBUX_EMOJI = "<:001_roblox_DNS:1501267296511856712>"
+
+# key: (label, usd, robux)
+PRICE_ITEMS = {
+    "regular_upload": ("regular upload", 14, 1500),
+    "limited_upload": ("limited upload", 3, 350),
+    "simple_necklace": ("simple necklace", 2, 250),
+    "locket": ("locket", 5, 600),
+    "one_name_regular": ("one name regular", 5, 550),
+    "one_name_beaded": ("one name beaded", 6, 650),
+    "two_name_necklace": ("two name necklace", 7, 750),
+    "chain": ("chain", 9, 1000),
+}
+
+CUSTOM_CHARM_PRICE = (2, 250)   # (usd, robux) each
+TEXT_DESIGN_PRICE = (3, 350)    # (usd, robux) each
+
+
+@bot.tree.command(name="price", description="Show the price in $ and Robux for an item plus optional add-ons")
+@app_commands.describe(
+    item="Main item",
+    custom_charms="How many custom charms to add (optional)",
+    text_designs="How many text designs to add (optional)",
+)
+@app_commands.choices(item=[app_commands.Choice(name=v[0], value=k) for k, v in PRICE_ITEMS.items()])
+async def price_command(
+    interaction: discord.Interaction,
+    item: str,
+    custom_charms: app_commands.Range[int, 0, 20] = 0,
+    text_designs: app_commands.Range[int, 0, 20] = 0,
+):
+    label, usd, robux = PRICE_ITEMS[item]
+    rows = [(label, usd, robux)]
+    if custom_charms:
+        rows.append((f"custom charms x{custom_charms}", CUSTOM_CHARM_PRICE[0] * custom_charms, CUSTOM_CHARM_PRICE[1] * custom_charms))
+    if text_designs:
+        rows.append((f"text designs x{text_designs}", TEXT_DESIGN_PRICE[0] * text_designs, TEXT_DESIGN_PRICE[1] * text_designs))
+
+    items_col = "\n".join(r[0] for r in rows)
+    usd_col = "\n".join(f"${r[1]}" for r in rows)
+    robux_col = "\n".join(f"{r[2]:,} {ROBUX_EMOJI}" for r in rows)
+
+    if len(rows) > 1:
+        total_usd = sum(r[1] for r in rows)
+        total_robux = sum(r[2] for r in rows)
+        items_col += "\n**total**"
+        usd_col += f"\n**${total_usd}**"
+        robux_col += f"\n**{total_robux:,}** {ROBUX_EMOJI}"
+
+    embed = discord.Embed(title="💸 price", color=get_theme_color("pink"))
+    embed.add_field(name="item", value=items_col, inline=True)
+    embed.add_field(name="$", value=usd_col, inline=True)
+    embed.add_field(name="robux", value=robux_col, inline=True)
+    await interaction.response.send_message(embed=embed)
+
+
+# ———————————————––
 # Commands — Roblox
 # ———————————————––
 
