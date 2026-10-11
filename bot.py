@@ -3235,12 +3235,12 @@ async def price_command(
     rows = []
     if item:
         rows.append(PRICE_ITEMS[item])
-    if upload:
-        rows.append(UPLOAD_OPTIONS[upload])
     if custom_charms == "yes":
         rows.append(("custom charms", CUSTOM_CHARM_PRICE[0], CUSTOM_CHARM_PRICE[1]))
     if text_designs == "yes":
         rows.append(("text designs", TEXT_DESIGN_PRICE[0], TEXT_DESIGN_PRICE[1]))
+    if upload:
+        rows.append(UPLOAD_OPTIONS[upload])
 
     if not rows:
         await interaction.response.send_message("❌ Pick at least an item, an upload option, or an add-on.", ephemeral=True)
