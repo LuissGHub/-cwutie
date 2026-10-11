@@ -82,6 +82,7 @@ SETTINGS_COLUMNS = [
     "ticket_category_id", "ticket_name_prefix", "ticket_ignore_user_ids",
     "showcase_channel_id", "showcase_text", "showcase_theme", "showcase_image2_url", "showcase_image3_url",
     "fastpass_role_ids",
+    "switch_unpaid_category_id", "switch_paid_category_id",
 ]
 
 # Columns for the image_responders table that were added after the table's
@@ -2996,6 +2997,70 @@ async def role_remove(interaction: discord.Interaction, user: discord.Member, ro
 
 
 bot.tree.add_command(role_group)
+
+
+# ———————————————––
+# Commands — Switch (move a ticket from unpaid to paid)
+# ———————————————––
+
+@bot.tree.command(name="switch_setup", description="Set the unpaid and paid ticket categories used by /switch")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(unpaid="Category your unpaid tickets live in", paid="Category paid tickets get moved to")
+async def switch_setup(interaction: discord.Interaction, unpaid: discord.CategoryChannel, paid: discord.CategoryChannel):
+    guild = guild_only(interaction)
+    if unpaid.id == paid.id:
+        await interaction.response.send_message("❌ The unpaid and paid categories need to be different.", ephemeral=True)
+        return
+
+    upsert_settings(guild.id, switch_unpaid_category_id=str(unpaid.id), switch_paid_category_id=str(paid.id))
+    await interaction.response.send_message(
+        f"{CHECK} `/switch` will now move tickets from **{unpaid.name}** → **{paid.name}**.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="switch", description="Move this ticket from unpaid to paid")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def switch_command(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    settings = get_settings(guild.id)
+    if not settings or not settings["switch_unpaid_category_id"] or not settings["switch_paid_category_id"]:
+        await interaction.response.send_message("Run `/switch_setup` first to pick your unpaid and paid categories.", ephemeral=True)
+        return
+
+    channel = interaction.channel
+    if not isinstance(channel, discord.TextChannel):
+        await interaction.response.send_message("❌ Use this inside a ticket channel.", ephemeral=True)
+        return
+
+    unpaid_id = int(settings["switch_unpaid_category_id"])
+    paid_id = int(settings["switch_paid_category_id"])
+
+    if channel.category_id == paid_id:
+        await interaction.response.send_message("This ticket is already in paid.", ephemeral=True)
+        return
+    if channel.category_id != unpaid_id:
+        await interaction.response.send_message("❌ This channel isn't in the unpaid category, so I can't switch it.", ephemeral=True)
+        return
+
+    paid_category = guild.get_channel(paid_id)
+    if not isinstance(paid_category, discord.CategoryChannel):
+        await interaction.response.send_message("⚠️ I can't find the paid category anymore. Run `/switch_setup` again.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    try:
+        # sync_permissions=False keeps the ticket's own overwrites (the
+        # customer's access) instead of replacing them with the category's.
+        await channel.edit(category=paid_category, sync_permissions=False, reason=f"/switch by {interaction.user}")
+    except discord.Forbidden:
+        await interaction.followup.send("⚠️ I don't have permission to move this channel (I need Manage Channels).")
+        return
+    except discord.HTTPException as e:
+        await interaction.followup.send(f"⚠️ Couldn't move it: {str(e)[:150]} (is the paid category full? Discord caps categories at 50 channels).")
+        return
+
+    await interaction.followup.send(f"{CHECK} Moved to **{paid_category.name}**")
 
 
 # ———————————————––
