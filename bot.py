@@ -3212,22 +3212,25 @@ TEXT_DESIGN_PRICE = (3, 350)    # (usd, robux), flat
 @bot.tree.command(name="price", description="Show the price in $ and Robux for an item, upload option, and add-ons")
 @app_commands.describe(
     item="Necklace / main item (optional)",
-    upload="Upload option (optional)",
     custom_charms="Add custom charms? (optional)",
     text_designs="Add text designs? (optional)",
+    upload="Upload option (optional)",
+    discount="Apply 10% discount?",
 )
 @app_commands.choices(
     item=[app_commands.Choice(name=v[0], value=k) for k, v in PRICE_ITEMS.items()],
-    upload=[app_commands.Choice(name=v[0], value=k) for k, v in UPLOAD_OPTIONS.items()],
     custom_charms=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
     text_designs=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
+    upload=[app_commands.Choice(name=v[0], value=k) for k, v in UPLOAD_OPTIONS.items()],
+    discount=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
 )
 async def price_command(
     interaction: discord.Interaction,
     item: str | None = None,
-    upload: str | None = None,
     custom_charms: str = "no",
     text_designs: str = "no",
+    upload: str | None = None,
+    discount: str = "no",
 ):
     rows = []
     if item:
@@ -3245,10 +3248,18 @@ async def price_command(
 
     lines = [f"• **{r[0]}**\n`{r[2]:,}` {ROBUX_EMOJI} • `${r[1]}`" for r in rows]
 
+    total_usd = sum(r[1] for r in rows)
+    total_robux = sum(r[2] for r in rows)
+
     if len(rows) > 1:
-        total_usd = sum(r[1] for r in rows)
-        total_robux = sum(r[2] for r in rows)
         lines.append(f"**total**\n`{total_robux:,}` {ROBUX_EMOJI} • `${total_usd}`")
+
+    if discount == "yes":
+        # Same 10% discount as /roblox calctax, applied to the whole total.
+        disc_robux = round(total_robux * 0.90)
+        disc_usd = round(total_usd * 0.90, 2)
+        disc_usd_text = f"{disc_usd:.2f}".rstrip("0").rstrip(".")
+        lines.append(f"**after 10% discount**\n`{disc_robux:,}` {ROBUX_EMOJI} • `${disc_usd_text}`")
 
     embed = discord.Embed(title="price", description="\n\n".join(lines), color=get_theme_color("pink"))
     await interaction.response.send_message(embed=embed)
