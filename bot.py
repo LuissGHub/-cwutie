@@ -2523,6 +2523,9 @@ async def imageresponder_remove(interaction: discord.Interaction, trigger: str):
 @app_commands.checks.has_permissions(manage_guild=True)
 async def imageresponder_list(interaction: discord.Interaction):
     guild = guild_only(interaction)
+    # Defer right away so slow DB reads can't trip Discord's 3-second window.
+    await interaction.response.defer(ephemeral=True)
+
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT * FROM image_responders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
@@ -2530,36 +2533,52 @@ async def imageresponder_list(interaction: discord.Interaction):
     conn.close()
 
     if not rows:
-        await interaction.response.send_message("No image responders set up yet.", ephemeral=True)
+        await interaction.followup.send("No image responders set up yet.", ephemeral=True)
         return
 
-    # Discord embeds cap out at 25 fields each, so paginate into chunks of 25
-    chunks = [rows[i:i + 25] for i in range(0, len(rows), 25)]
-    embeds = []
-    for idx, chunk in enumerate(chunks, start=1):
-        page_title = f"🖼️ Image Responders (page {idx}/{len(chunks)})" if len(chunks) > 1 else "🖼️ Image Responders"
-        embed = discord.Embed(title=page_title, color=get_theme_color("pink"))
-        for row in chunk:
-            is_embed = row["as_embed"] != 0
-            title_text = f"\nTitle: {row['title']}" if is_embed and row["title"] else ""
-            image_text = f"[image]({row['image_url']})" if row["image_url"] else "*(no image)*"
-            caption_text = f"\nCaption: {row['caption'][:100]}" if row["caption"] else ""
-            mode_text = f"\nMode: {'embed' if is_embed else 'plain image'}"
-            if is_embed:
-                thumb_text = f"\nSide image: [link]({row['thumbnail_url']})" if row["thumbnail_url"] else ""
-                color_text = f"\nColor: {row['color'] or 'pink'}"
-                footer_text = f"\nFooter: {row['footer']}" if row["footer"] else ""
-                image2_text = f"\n2nd image: [link]({row['image_url2']})" if row["image_url2"] else ""
-            else:
-                thumb_text = color_text = footer_text = image2_text = ""
-            value = f"{image_text}{title_text}{caption_text}{mode_text}{color_text}{thumb_text}{footer_text}{image2_text}"
-            embed.add_field(name=f"`{row['trigger']}` — {row['match_type'] or 'exact'}", value=value[:1024], inline=False)
-        embeds.append(embed)
+    # Discord limits an embed to 25 fields AND 6000 total characters (and the
+    # 6000 is shared across every embed in one message), so pages are split
+    # by a character budget as well as field count.
+    EMBED_CHAR_BUDGET = 4500
+    pages: list[list[tuple[str, str]]] = []
+    current: list[tuple[str, str]] = []
+    current_chars = 0
 
-    # Discord also caps messages at 10 embeds each, so batch those too
-    await interaction.response.send_message(embeds=embeds[:10], ephemeral=True)
-    for i in range(10, len(embeds), 10):
-        await interaction.followup.send(embeds=embeds[i:i + 10], ephemeral=True)
+    for row in rows:
+        is_embed = row["as_embed"] != 0
+        title_text = f"\nTitle: {row['title'][:80]}" if is_embed and row["title"] else ""
+        image_text = f"[image]({row['image_url']})" if row["image_url"] else "*(no image)*"
+        caption_text = f"\nCaption: {row['caption'][:60]}" if row["caption"] else ""
+        mode_text = f"\nMode: {'embed' if is_embed else 'plain image'}"
+        if is_embed:
+            thumb_text = f"\nSide image: [link]({row['thumbnail_url']})" if row["thumbnail_url"] else ""
+            color_text = f"\nColor: {row['color'] or 'pink'}"
+            footer_text = f"\nFooter: {row['footer'][:60]}" if row["footer"] else ""
+            image2_text = f"\n2nd image: [link]({row['image_url2']})" if row["image_url2"] else ""
+        else:
+            thumb_text = color_text = footer_text = image2_text = ""
+
+        name = f"`{row['trigger']}` — {row['match_type'] or 'exact'}"[:256]
+        value = f"{image_text}{title_text}{caption_text}{mode_text}{color_text}{thumb_text}{footer_text}{image2_text}"[:1024]
+        size = len(name) + len(value)
+
+        if current and (len(current) >= 25 or current_chars + size > EMBED_CHAR_BUDGET):
+            pages.append(current)
+            current = []
+            current_chars = 0
+        current.append((name, value))
+        current_chars += size
+
+    if current:
+        pages.append(current)
+
+    # One embed per message keeps each message under Discord's 6000-char cap.
+    for idx, page in enumerate(pages, start=1):
+        page_title = f"🖼️ Image Responders (page {idx}/{len(pages)})" if len(pages) > 1 else "🖼️ Image Responders"
+        embed = discord.Embed(title=page_title, color=get_theme_color("pink"))
+        for name, value in page:
+            embed.add_field(name=name, value=value, inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ------------------------------------------------------------
