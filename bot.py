@@ -634,7 +634,12 @@ async def post_image_responder(channel: discord.abc.Messageable, img) -> None:
         if file is None and image_url:
             file = await fetch_image_file(image_url)
         if file:
-            await channel.send(content=(img["caption"] or None), file=file)
+            # Discord shows an "image.png" filename chip when text and an
+            # attachment are in the same message, so send them separately:
+            # caption first, then the bare image.
+            if img["caption"]:
+                await channel.send(img["caption"])
+            await channel.send(file=file)
         else:
             await channel.send(build_plain_image_content(img["caption"], image_url))
         return
@@ -696,7 +701,8 @@ async def send_responder_preview(
     if file is None and image_url:
         file = await fetch_image_file(image_url)
     if file:
-        await interaction.followup.send(f"{header}\n{caption or ''}".strip(), file=file, ephemeral=True)
+        await interaction.followup.send(f"{header}\n{caption or ''}".strip(), ephemeral=True)
+        await interaction.followup.send(file=file, ephemeral=True)
     else:
         await interaction.followup.send(f"{header}\n{build_plain_image_content(caption, image_url)}".strip(), ephemeral=True)
 
