@@ -540,9 +540,12 @@ def build_plain_image_content(caption: str | None, image_url: str | None) -> str
     it shows up as the image/gif without an embed box around it."""
     caption = (caption or "").strip()
     image_url = (image_url or "").strip()
-    if caption and image_url:
-        return f"{caption}\n{image_url}"
-    return caption or image_url
+    # Hide the link text behind an invisible (zero-width) masked link so only
+    # Discord's inline image preview shows — no visible URL / "image.png" text.
+    hidden_link = f"[\u200b]({image_url.replace(')', '%29')})" if image_url else ""
+    if caption and hidden_link:
+        return f"{caption}\n{hidden_link}"
+    return caption or hidden_link
 
 
 PLAIN_IMAGE_MAX_BYTES = 8 * 1024 * 1024
@@ -554,17 +557,23 @@ async def fetch_image_file(image_url: str) -> discord.File | None:
     None if the download fails or the file is too big, in which case callers
     fall back to posting the plain link."""
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
             async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
                     print(f"[DEBUG] Image download failed ({resp.status}) for {image_url}")
                     return None
+                content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
                 data = await resp.read()
         if len(data) > PLAIN_IMAGE_MAX_BYTES:
             print(f"[DEBUG] Image too large to re-upload ({len(data)} bytes): {image_url}")
             return None
-        name = image_url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1] or "image.png"
-        if "." not in name:
+        name = image_url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1] or "image"
+        ext_by_type = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
+        real_ext = ext_by_type.get(content_type)
+        if real_ext:
+            # Use the real file type so a gif isn't uploaded as "something.png".
+            name = name.rsplit(".", 1)[0] + "." + real_ext if "." in name else f"{name}.{real_ext}"
+        elif "." not in name:
             name += ".png"
         return discord.File(io.BytesIO(data), filename=name)
     except Exception as e:
