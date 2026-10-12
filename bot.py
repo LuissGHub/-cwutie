@@ -102,6 +102,11 @@ IMAGE_RESPONDER_COLUMNS = [
     # Optional embed title (this is what lets image responders fully replace
     # the old saved-embed commands). Embed mode only.
     ("title", "TEXT"),
+    # The main image's actual bytes, downloaded once when the responder is
+    # added/edited. Discord CDN attachment links expire, so posting from our
+    # own stored copy keeps the responder working forever.
+    ("image_blob", "BLOB"),
+    ("image_name", "TEXT"),
 ]
 
 # ------------------------------------------------------------
@@ -250,6 +255,8 @@ def init_db() -> None:
             as_embed INTEGER DEFAULT 1,
             image_url2 TEXT,
             title TEXT,
+            image_blob BLOB,
+            image_name TEXT,
             UNIQUE(guild_id, trigger)
         )
         """
@@ -535,17 +542,16 @@ def check_trigger(content_lower: str, trigger: str, match_type: str) -> bool:
 
 
 def build_plain_image_content(caption: str | None, image_url: str | None) -> str:
-    """Builds the text for a non-embed image responder: the caption (if any)
-    followed by the raw image link. Discord auto-previews the link inline, so
-    it shows up as the image/gif without an embed box around it."""
+    """Fallback text for a non-embed image responder when we have no stored
+    image bytes and the download failed: the caption (if any) followed by the
+    raw image link. Discord auto-previews a raw link inline if it still works.
+    (The old zero-width masked link showed up as literal "[](https://...)"
+    text whenever Discord couldn't preview it, so this uses the plain URL.)"""
     caption = (caption or "").strip()
     image_url = (image_url or "").strip()
-    # Hide the link text behind an invisible (zero-width) masked link so only
-    # Discord's inline image preview shows — no visible URL / "image.png" text.
-    hidden_link = f"[\u200b]({image_url.replace(')', '%29')})" if image_url else ""
-    if caption and hidden_link:
-        return f"{caption}\n{hidden_link}"
-    return caption or hidden_link
+    if caption and image_url:
+        return f"{caption}\n{image_url}"
+    return caption or image_url
 
 
 PLAIN_IMAGE_MAX_BYTES = 8 * 1024 * 1024
@@ -581,25 +587,52 @@ async def fetch_image_file(image_url: str) -> discord.File | None:
         return None
 
 
+async def fetch_image_data(image_url: str) -> tuple[bytes, str] | None:
+    """Downloads an image and returns (bytes, safe_filename), or None if the
+    download failed (expired link, too big, etc). Used to store a permanent
+    copy of the image in the database when a responder is added/edited."""
+    f = await fetch_image_file(image_url)
+    if not f:
+        return None
+    f.fp.seek(0)
+    data = f.fp.read()
+    # Keep the filename safe for use in attachment://<name> embed references.
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", f.filename) or "image.png"
+    return data, safe_name
+
+
+def stored_image_file(blob: bytes | None, name: str | None) -> discord.File | None:
+    """Builds a fresh discord.File from stored image bytes (a File can only
+    be sent once, so call this every time you post)."""
+    if not blob:
+        return None
+    return discord.File(io.BytesIO(blob), filename=name or "image.png")
+
+
 # ------------------------------------------------------------
 # Image Responder Helpers
 # ------------------------------------------------------------
 
 async def post_image_responder(channel: discord.abc.Messageable, img) -> None:
     """Posts an image responder row (any dict-like / sqlite Row with the
-    image_responders columns) into a channel."""
+    image_responders columns) into a channel. Uses the stored copy of the
+    image when there is one; falls back to downloading from the saved URL
+    for older responders that were created before images were stored."""
     image_url = img["image_url"] or None
+    blob = img["image_blob"]
+    blob_name = img["image_name"]
 
     if img["as_embed"] == 0:
-        # Plain (non-embed) mode: re-upload the image as an attachment so
-        # only the picture (and caption, if any) shows. Falls back to the
-        # raw link if the download fails. (No title / 2nd-image support in
-        # plain mode — leave as_embed on to use those.)
-        if not image_url:
+        # Plain (non-embed) mode: send the image as an attachment so only
+        # the picture (and caption, if any) shows. (No title / 2nd-image
+        # support in plain mode — leave as_embed on to use those.)
+        if not image_url and not blob:
             if img["caption"]:
                 await channel.send(img["caption"])
             return
-        file = await fetch_image_file(image_url)
+        file = stored_image_file(blob, blob_name)
+        if file is None and image_url:
+            file = await fetch_image_file(image_url)
         if file:
             await channel.send(content=(img["caption"] or None), file=file)
         else:
@@ -607,16 +640,21 @@ async def post_image_responder(channel: discord.abc.Messageable, img) -> None:
         return
 
     theme = img["color"] or "pink"
+    file = stored_image_file(blob, blob_name)
+    embed_image = f"attachment://{file.filename}" if file else image_url
     embed = build_embed(
         title=img["title"] or None,
         description=img["caption"] or None,
         theme=theme,
-        image=image_url,
+        image=embed_image,
         thumbnail=img["thumbnail_url"] or None,
         footer=img["footer"] or None,
         footer_icon=img["footer_icon"] or None,
     )
-    await channel.send(embed=embed)
+    if file:
+        await channel.send(embed=embed, file=file)
+    else:
+        await channel.send(embed=embed)
     if img["image_url2"]:
         embed2 = build_embed(title=None, description=None, theme=theme, image=img["image_url2"])
         await channel.send(embed=embed2)
@@ -635,18 +673,28 @@ async def send_responder_preview(
     footer: str | None,
     footer_icon: str | None,
     as_embed: bool,
+    blob: bytes | None = None,
+    blob_name: str | None = None,
 ) -> None:
-    """Ephemeral preview shown after /imageresponder_add and /imageresponder_edit."""
+    """Ephemeral preview shown after /imageresponder_add and /imageresponder_edit.
+    The caller must have already deferred the interaction, so this always
+    answers with a followup."""
+    file = stored_image_file(blob, blob_name)
+
     if as_embed:
         theme = color or "pink"
-        embeds = [build_embed(title=title or None, description=caption or None, theme=theme, image=image_url or None, thumbnail=thumbnail_url or None, footer=footer or None, footer_icon=footer_icon or None)]
+        embed_image = f"attachment://{file.filename}" if file else (image_url or None)
+        embeds = [build_embed(title=title or None, description=caption or None, theme=theme, image=embed_image, thumbnail=thumbnail_url or None, footer=footer or None, footer_icon=footer_icon or None)]
         if image_url2:
             embeds.append(build_embed(title=None, description=None, theme=theme, image=image_url2))
-        await interaction.response.send_message(header, embeds=embeds, ephemeral=True)
+        if file:
+            await interaction.followup.send(header, embeds=embeds, file=file, ephemeral=True)
+        else:
+            await interaction.followup.send(header, embeds=embeds, ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True)
-    file = await fetch_image_file(image_url) if image_url else None
+    if file is None and image_url:
+        file = await fetch_image_file(image_url)
     if file:
         await interaction.followup.send(f"{header}\n{caption or ''}".strip(), file=file, ephemeral=True)
     else:
@@ -2400,6 +2448,30 @@ async def imageresponder_add(interaction: discord.Interaction, trigger: str, ima
         await interaction.response.send_message("❌ Give me at least an image URL, a title, or a caption.", ephemeral=True)
         return
 
+    # Check for a duplicate before doing any slow work.
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM image_responders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
+    exists = cur.fetchone()
+    conn.close()
+    if exists:
+        await interaction.response.send_message(f"❌ Trigger `{trigger}` already exists. Use `/imageresponder_edit {trigger}` to change it.", ephemeral=True)
+        return
+
+    # Downloading can take a few seconds, so defer first (Discord gives us
+    # 3 seconds to respond). Everything after this uses followup.
+    await interaction.response.defer(ephemeral=True)
+
+    # Download the image NOW and keep our own copy — Discord CDN links
+    # expire, so posting from the link later would eventually break.
+    blob = blob_name = None
+    if image_url:
+        got = await fetch_image_data(image_url)
+        if not got:
+            await interaction.followup.send("❌ Couldn't download that image — the link may be expired, private, or over 8 MB. Re-upload it and paste a fresh link.", ephemeral=True)
+            return
+        blob, blob_name = got
+
     caption = caption.replace("\\n", "\n") if caption else caption
     footer_icon_url = resolve_icon_url(footer_icon)
     conn = get_db()
@@ -2407,12 +2479,12 @@ async def imageresponder_add(interaction: discord.Interaction, trigger: str, ima
 
     try:
         cur.execute(
-            "INSERT INTO image_responders (guild_id, trigger, image_url, caption, match_type, color, thumbnail_url, footer, footer_icon, as_embed, image_url2, title) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (guild.id, trigger, image_url or "", caption, match_type, color or "pink", thumbnail_url, footer, footer_icon_url, 1 if as_embed else 0, image_url2, title),
+            "INSERT INTO image_responders (guild_id, trigger, image_url, caption, match_type, color, thumbnail_url, footer, footer_icon, as_embed, image_url2, title, image_blob, image_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (guild.id, trigger, image_url or "", caption, match_type, color or "pink", thumbnail_url, footer, footer_icon_url, 1 if as_embed else 0, image_url2, title, blob, blob_name),
         )
         conn.commit()
     except sqlite3.IntegrityError:
-        await interaction.response.send_message(f"❌ Trigger `{trigger}` already exists. Use `/imageresponder_edit {trigger}` to change it.", ephemeral=True)
+        await interaction.followup.send(f"❌ Trigger `{trigger}` already exists. Use `/imageresponder_edit {trigger}` to change it.", ephemeral=True)
         return
     finally:
         conn.close()
@@ -2422,7 +2494,7 @@ async def imageresponder_add(interaction: discord.Interaction, trigger: str, ima
         interaction, header,
         title=title, caption=caption, image_url=image_url, image_url2=image_url2,
         color=color, thumbnail_url=thumbnail_url, footer=footer, footer_icon=footer_icon_url,
-        as_embed=as_embed,
+        as_embed=as_embed, blob=blob, blob_name=blob_name,
     )
 
 
@@ -2449,16 +2521,27 @@ async def imageresponder_edit(interaction: discord.Interaction, trigger: str, im
     cur = conn.cursor()
     cur.execute("SELECT * FROM image_responders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
     row = cur.fetchone()
+    conn.close()
 
     if not row:
-        conn.close()
         await interaction.response.send_message(f"No image responder `{trigger}` found.", ephemeral=True)
         return
 
+    # Image + stored copy. If no new image URL was given, keep whatever is
+    # already stored (including the stored bytes).
+    final_blob = row["image_blob"]
+    final_blob_name = row["image_name"]
+    needs_download = False
     if image_url is None:
         final_image = row["image_url"] or ""
+    elif image_url.lower() == "none":
+        final_image = ""
+        final_blob = None
+        final_blob_name = None
     else:
-        final_image = "" if image_url.lower() == "none" else image_url
+        final_image = image_url
+        needs_download = True
+
     if title is None:
         final_title = row["title"]
     else:
@@ -2491,13 +2574,24 @@ async def imageresponder_edit(interaction: discord.Interaction, trigger: str, im
         final_image_url2 = None if image_url2.lower() == "none" else image_url2
 
     if not (final_image or final_title or final_caption):
-        conn.close()
         await interaction.response.send_message("❌ That would leave the responder empty — it needs at least an image, a title, or a caption.", ephemeral=True)
         return
 
+    # Defer before the (possibly slow) download. Everything after this uses followup.
+    await interaction.response.defer(ephemeral=True)
+
+    if needs_download:
+        got = await fetch_image_data(final_image)
+        if not got:
+            await interaction.followup.send("❌ Couldn't download that image — the link may be expired, private, or over 8 MB. Re-upload it and paste a fresh link. (Nothing was changed.)", ephemeral=True)
+            return
+        final_blob, final_blob_name = got
+
+    conn = get_db()
+    cur = conn.cursor()
     cur.execute(
-        "UPDATE image_responders SET image_url = ?, title = ?, caption = ?, match_type = ?, as_embed = ?, color = ?, thumbnail_url = ?, footer = ?, footer_icon = ?, image_url2 = ? WHERE guild_id = ? AND trigger = ?",
-        (final_image, final_title, final_caption, final_match, final_as_embed, final_color, final_thumbnail, final_footer, final_footer_icon, final_image_url2, guild.id, trigger),
+        "UPDATE image_responders SET image_url = ?, title = ?, caption = ?, match_type = ?, as_embed = ?, color = ?, thumbnail_url = ?, footer = ?, footer_icon = ?, image_url2 = ?, image_blob = ?, image_name = ? WHERE guild_id = ? AND trigger = ?",
+        (final_image, final_title, final_caption, final_match, final_as_embed, final_color, final_thumbnail, final_footer, final_footer_icon, final_image_url2, final_blob, final_blob_name, guild.id, trigger),
     )
     conn.commit()
     conn.close()
@@ -2507,7 +2601,7 @@ async def imageresponder_edit(interaction: discord.Interaction, trigger: str, im
         interaction, header,
         title=final_title, caption=final_caption, image_url=final_image, image_url2=final_image_url2,
         color=final_color, thumbnail_url=final_thumbnail, footer=final_footer, footer_icon=final_footer_icon,
-        as_embed=bool(final_as_embed),
+        as_embed=bool(final_as_embed), blob=final_blob, blob_name=final_blob_name,
     )
 
 
@@ -2537,7 +2631,12 @@ async def imageresponder_list(interaction: discord.Interaction):
 
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM image_responders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
+    # Don't pull the image bytes just to list responders.
+    cur.execute(
+        "SELECT trigger, image_url, caption, match_type, color, thumbnail_url, footer, as_embed, image_url2, title, "
+        "(image_blob IS NOT NULL) AS has_copy FROM image_responders WHERE guild_id = ? ORDER BY trigger",
+        (guild.id,),
+    )
     rows = cur.fetchall()
     conn.close()
 
@@ -2556,7 +2655,10 @@ async def imageresponder_list(interaction: discord.Interaction):
     for row in rows:
         is_embed = row["as_embed"] != 0
         title_text = f"\nTitle: {row['title'][:80]}" if is_embed and row["title"] else ""
-        image_text = f"[image]({row['image_url']})" if row["image_url"] else "*(no image)*"
+        if row["image_url"]:
+            image_text = f"[image]({row['image_url']})" + ("" if row["has_copy"] else " ⚠️ no saved copy — re-save with /imageresponder_edit")
+        else:
+            image_text = "*(no image)*"
         caption_text = f"\nCaption: {row['caption'][:60]}" if row["caption"] else ""
         mode_text = f"\nMode: {'embed' if is_embed else 'plain image'}"
         if is_embed:
