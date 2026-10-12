@@ -2581,6 +2581,79 @@ async def imageresponder_list(interaction: discord.Interaction):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
+def _normalize_name_for_trigger(name: str) -> str:
+    """Saved embed names are stored as typed (e.g. '/cwutielogo'), while image
+    responder triggers are stored lowercase with any leading '.' stripped, so
+    compare them in the same normalized form."""
+    return (name or "").strip().lower().lstrip("./")
+
+
+class ImageResponderCleanupView(discord.ui.View):
+    def __init__(self, guild_id: int, triggers: list[str], owner_id: int):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        self.triggers = triggers
+        self.owner_id = owner_id
+
+    @discord.ui.button(label="Delete from image responders", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("This isn't your menu.", ephemeral=True)
+            return
+        conn = get_db()
+        cur = conn.cursor()
+        placeholders = ",".join("?" for _ in self.triggers)
+        cur.execute(
+            f"DELETE FROM image_responders WHERE guild_id = ? AND trigger IN ({placeholders})",
+            (self.guild_id, *self.triggers),
+        )
+        deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+        await interaction.response.edit_message(
+            content=f"🗑️ Deleted **{deleted}** image responder(s). Your saved embeds (`/embedlist`) were not touched.",
+            view=None,
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("This isn't your menu.", ephemeral=True)
+            return
+        await interaction.response.edit_message(content="Cancelled — nothing was deleted.", view=None)
+
+
+@bot.tree.command(name="imageresponder_cleanup", description="Find image responders that share a name with a saved embed, and delete them")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def imageresponder_cleanup(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    await interaction.response.defer(ephemeral=True)
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM saved_embeds WHERE guild_id = ?", (guild.id,))
+    saved_names = {_normalize_name_for_trigger(r["name"]) for r in cur.fetchall()}
+    saved_names.discard("")
+    cur.execute("SELECT trigger FROM image_responders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
+    responder_triggers = [r["trigger"] for r in cur.fetchall()]
+    conn.close()
+
+    matches = [t for t in responder_triggers if t in saved_names]
+    if not matches:
+        await interaction.followup.send("No image responders share a name with a saved embed — nothing to clean up.", ephemeral=True)
+        return
+
+    listing = ", ".join(f"`{t}`" for t in matches)
+    if len(listing) > 1500:
+        listing = listing[:1500] + "…"
+    await interaction.followup.send(
+        f"Found **{len(matches)}** image responder(s) with the same name as a saved embed:\n{listing}\n\n"
+        "Deleting removes them from `/imageresponder_list` only. Your saved embeds stay.",
+        view=ImageResponderCleanupView(guild.id, matches, interaction.user.id),
+        ephemeral=True,
+    )
+
+
 # ------------------------------------------------------------
 # Commands — Lim (redeem message template)
 # ------------------------------------------------------------
