@@ -29,7 +29,7 @@ print("WAITLIST FILE:", WAITLIST_FILE)
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix=".", intents=intents, help_command=None)
 
 # ------------------------------------------------------------
 # Constants
@@ -1290,6 +1290,21 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             await interaction.response.send_message(msg, ephemeral=True)
     except discord.HTTPException:
         pass
+
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    """Prefix-command errors. Anything typed with a leading dot that isn't a
+    real command (e.g. an autoresponder trigger like .hello) is silently ignored."""
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("This command only works in a server.")
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.send("⚠️ You don't have permission to use this command.")
+    else:
+        print(f"[COMMAND ERROR] .{ctx.command.name if ctx.command else '?'}: {error!r}")
+        await ctx.send("⚠️ Something went wrong running that command. It's been logged.")
 
 
 @bot.event
@@ -3363,76 +3378,111 @@ def parse_duration(raw: str | None) -> timedelta | None:
     return timedelta(seconds=seconds)
 
 
-@bot.tree.command(name="ban", description="Ban a user from the server (permanent or temporary)")
-@app_commands.checks.has_permissions(ban_members=True)
-@app_commands.describe(
-    user="User to ban (you can also paste a user ID to ban someone who already left)",
-    duration="How long, e.g. 30m, 12h, 7d, 2w, 1w2d. Leave blank for a permanent ban",
-    reason="Why they're being banned (saved in the audit log)",
-    delete_messages="Also delete their recent messages",
-)
-@app_commands.choices(delete_messages=[
-    app_commands.Choice(name="don't delete any", value=0),
-    app_commands.Choice(name="previous hour", value=3600),
-    app_commands.Choice(name="previous 6 hours", value=6 * 3600),
-    app_commands.Choice(name="previous 12 hours", value=12 * 3600),
-    app_commands.Choice(name="previous 24 hours", value=24 * 3600),
-    app_commands.Choice(name="previous 3 days", value=3 * 86400),
-    app_commands.Choice(name="previous 7 days", value=7 * 86400),
-])
-async def ban_command(
-    interaction: discord.Interaction,
-    user: discord.User,
-    duration: str | None = None,
-    reason: str | None = None,
-    delete_messages: app_commands.Choice[int] | None = None,
-):
-    guild = guild_only(interaction)
-    moderator = interaction.user
-
+async def resolve_user_token(token: str) -> discord.User | None:
+    """Turns a @mention or raw user ID into a User (works even if they've
+    already left the server). Returns None if it isn't one."""
+    m = USER_MENTION_RE.match(token)
+    raw = m.group(1) if m else token
+    if not raw.isdigit():
+        return None
     try:
-        delta = parse_duration(duration)
-    except ValueError:
-        await interaction.response.send_message("❌ I couldn't read that duration. Use things like `30m`, `12h`, `7d`, `2w`, or `1w2d` (minimum 1 minute) — or leave it blank for a permanent ban.", ephemeral=True)
+        return await bot.fetch_user(int(raw))
+    except discord.NotFound:
+        return None
+
+
+BAN_USAGE = (
+    "**Usage:** `.ban <@user or ID> [duration] [reason] [-d <delete window>]`\n"
+    "`.ban @user` — permanent\n"
+    "`.ban @user 7d spamming` — 7 day ban\n"
+    "`.ban @user perm scam -d 24h` — permanent, and delete their last 24 hours of messages\n"
+    "*Duration: `30m`, `12h`, `7d`, `2w`, `1w2d`. Delete window: up to `7d`.*"
+)
+
+
+@bot.command(name="ban")
+@commands.guild_only()
+@commands.has_permissions(ban_members=True)
+async def ban_prefix(ctx: commands.Context, *, args: str = ""):
+    guild = ctx.guild
+    moderator = ctx.author
+    tokens = args.split()
+
+    # Optional "-d <window>" flag: how far back to delete their messages.
+    delete_seconds = 0
+    if "-d" in tokens:
+        i = tokens.index("-d")
+        if i + 1 >= len(tokens):
+            await ctx.send(BAN_USAGE)
+            return
+        try:
+            window = parse_duration(tokens[i + 1])
+        except ValueError:
+            window = None
+        if window is None or window > timedelta(days=7):
+            await ctx.send("❌ The `-d` delete window needs a time between `1m` and `7d` (e.g. `-d 24h`).")
+            return
+        delete_seconds = int(window.total_seconds())
+        del tokens[i:i + 2]
+
+    if not tokens:
+        await ctx.send(BAN_USAGE)
         return
+
+    user = await resolve_user_token(tokens[0])
+    if user is None:
+        await ctx.send("❌ I couldn't find that user. Mention them or paste their user ID.\n" + BAN_USAGE)
+        return
+
+    # Optional duration right after the user ("perm" also accepted).
+    rest = tokens[1:]
+    delta = None
+    if rest:
+        if rest[0].lower() in PERMANENT_WORDS:
+            rest = rest[1:]
+        else:
+            try:
+                delta = parse_duration(rest[0])
+                rest = rest[1:]
+            except ValueError:
+                pass  # not a duration — it's the start of the reason
+    reason = " ".join(rest) or None
 
     if user.id == moderator.id:
-        await interaction.response.send_message("❌ You can't ban yourself.", ephemeral=True)
+        await ctx.send("❌ You can't ban yourself.")
         return
     if bot.user and user.id == bot.user.id:
-        await interaction.response.send_message("❌ I can't ban myself.", ephemeral=True)
+        await ctx.send("❌ I can't ban myself.")
         return
     if user.id == guild.owner_id:
-        await interaction.response.send_message("❌ You can't ban the server owner.", ephemeral=True)
+        await ctx.send("❌ You can't ban the server owner.")
         return
 
     # Role hierarchy checks only apply if they're still in the server.
     target_member = guild.get_member(user.id)
     if target_member is not None:
         if moderator.id != guild.owner_id and target_member.top_role >= moderator.top_role:
-            await interaction.response.send_message("❌ You can't ban someone whose highest role is equal to or above yours.", ephemeral=True)
+            await ctx.send("❌ You can't ban someone whose highest role is equal to or above yours.")
             return
         if target_member.top_role >= guild.me.top_role:
-            await interaction.response.send_message("⚠️ I can't ban them — their highest role is equal to or above mine. Move my role higher in Server Settings → Roles.", ephemeral=True)
+            await ctx.send("⚠️ I can't ban them — their highest role is equal to or above mine. Move my role higher in Server Settings → Roles.")
             return
 
-    delete_seconds = delete_messages.value if delete_messages else 0
     unban_at = datetime.now(timezone.utc) + delta if delta else None
 
     audit_reason = f"{reason or 'No reason given'} (banned by {moderator} [{moderator.id}]"
     audit_reason += f", unbans {unban_at.strftime('%Y-%m-%d %H:%M UTC')})" if unban_at else ")"
 
-    await interaction.response.defer()
     try:
         await guild.ban(user, reason=audit_reason[:512], delete_message_seconds=delete_seconds)
     except discord.Forbidden:
-        await interaction.followup.send("⚠️ I don't have permission to ban that user (I need the Ban Members permission and a high enough role).", ephemeral=True)
+        await ctx.send("⚠️ I don't have permission to ban that user (I need the Ban Members permission and a high enough role).")
         return
     except discord.NotFound:
-        await interaction.followup.send("❌ I couldn't find that user.", ephemeral=True)
+        await ctx.send("❌ I couldn't find that user.")
         return
     except discord.HTTPException as e:
-        await interaction.followup.send(f"⚠️ Couldn't ban them: {str(e)[:150]}", ephemeral=True)
+        await ctx.send(f"⚠️ Couldn't ban them: {str(e)[:150]}")
         return
 
     # Record (or replace) the scheduled unban. Any earlier pending timer for
@@ -3449,16 +3499,77 @@ async def ban_command(
     conn.commit()
     conn.close()
 
-    msg = f"{CHECK} Banned **{user}** (`{user.id}`)."
+    msg = f"{CHECK} Banned **{user}**."
     if unban_at:
         msg += f"\n**Duration:** unbans <t:{int(unban_at.timestamp())}:R>"
     else:
         msg += "\n**Duration:** permanent"
     if reason:
         msg += f"\n**Reason:** {reason}"
-    if delete_seconds:
-        msg += f"\n**Messages deleted:** {delete_messages.name}"
-    await interaction.followup.send(msg)
+    await ctx.send(msg)
+
+
+UNBAN_USAGE = "**Usage:** `.unban <@user, ID, or username> [reason]`"
+
+
+@bot.command(name="unban")
+@commands.guild_only()
+@commands.has_permissions(ban_members=True)
+async def unban_prefix(ctx: commands.Context, *, args: str = ""):
+    guild = ctx.guild
+    tokens = args.split()
+    if not tokens:
+        await ctx.send(UNBAN_USAGE)
+        return
+
+    query = tokens[0]
+    reason = " ".join(tokens[1:]) or None
+
+    m = USER_MENTION_RE.match(query)
+    raw = m.group(1) if m else query
+
+    ban_entry = None
+    try:
+        if raw.isdigit():
+            ban_entry = await guild.fetch_ban(discord.Object(id=int(raw)))
+        else:
+            # Not an ID — look the name up in the ban list.
+            wanted = query.lower()
+            async for entry in guild.bans(limit=None):
+                if entry.user.name.lower() == wanted or str(entry.user).lower() == wanted:
+                    ban_entry = entry
+                    break
+    except discord.NotFound:
+        ban_entry = None
+    except discord.Forbidden:
+        await ctx.send("⚠️ I don't have permission to view bans (I need the Ban Members permission).")
+        return
+
+    if ban_entry is None:
+        await ctx.send("❌ I couldn't find that user in the ban list.")
+        return
+
+    audit_reason = f"{reason or 'No reason given'} (unbanned by {ctx.author} [{ctx.author.id}])"[:512]
+    try:
+        await guild.unban(ban_entry.user, reason=audit_reason)
+    except discord.Forbidden:
+        await ctx.send("⚠️ I don't have permission to unban that user.")
+        return
+    except discord.HTTPException as e:
+        await ctx.send(f"⚠️ Couldn't unban them: {str(e)[:150]}")
+        return
+
+    # Cancel any pending temp-ban timer so it doesn't try to unban them again.
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE temp_bans SET done = 1 WHERE guild_id = ? AND user_id = ? AND done = 0", (guild.id, ban_entry.user.id))
+    conn.commit()
+    conn.close()
+
+    msg = f"{CHECK} Unbanned **{ban_entry.user}**."
+    if reason:
+        msg += f"\n**Reason:** {reason}"
+    await ctx.send(msg)
 
 
 @tasks.loop(seconds=TEMPBAN_CHECK_INTERVAL_SECONDS)
