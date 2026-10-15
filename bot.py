@@ -299,6 +299,18 @@ def init_db() -> None:
         """
     )
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS temp_bans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            unban_time TEXT NOT NULL,
+            done INTEGER DEFAULT 0
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -1246,6 +1258,8 @@ async def on_ready():
     bot.add_view(VerifyView())
     if not check_fastpass_timers.is_running():
         check_fastpass_timers.start()
+    if not check_temp_bans.is_running():
+        check_temp_bans.start()
     print(f"Bot user: {bot.user}")
     synced = await bot.tree.sync()
     print(f"Synced {len(synced)} global command(s)")
@@ -3325,21 +3339,62 @@ async def removeuser(interaction: discord.Interaction, user: discord.Member):
 # Commands — Moderation (ban)
 # ------------------------------------------------------------
 
-@bot.tree.command(name="ban", description="Ban a user from the server")
+# How often the background loop checks for temporary bans that have expired.
+TEMPBAN_CHECK_INTERVAL_SECONDS = 60
+
+DURATION_RE = re.compile(r"(\d+)\s*([smhdw])", re.IGNORECASE)
+DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+PERMANENT_WORDS = {"", "perm", "permanent", "forever", "none"}
+
+
+def parse_duration(raw: str | None) -> timedelta | None:
+    """Parses things like '7d', '12h', '1w2d', '90m' into a timedelta.
+    Returns None for a permanent ban (blank / 'perm' / 'permanent').
+    Raises ValueError if the text can't be understood."""
+    text = (raw or "").strip().lower()
+    if text in PERMANENT_WORDS:
+        return None
+    # The whole string must be made of number+unit chunks (e.g. "1w2d").
+    if not re.fullmatch(r"(?:\d+\s*[smhdw]\s*)+", text):
+        raise ValueError("bad duration")
+    seconds = sum(int(n) * DURATION_UNITS[u.lower()] for n, u in DURATION_RE.findall(text))
+    if seconds < 60:
+        raise ValueError("too short")
+    return timedelta(seconds=seconds)
+
+
+@bot.tree.command(name="ban", description="Ban a user from the server (permanent or temporary)")
 @app_commands.checks.has_permissions(ban_members=True)
 @app_commands.describe(
     user="User to ban (you can also paste a user ID to ban someone who already left)",
+    duration="How long, e.g. 30m, 12h, 7d, 2w, 1w2d. Leave blank for a permanent ban",
     reason="Why they're being banned (saved in the audit log)",
-    delete_message_days="Also delete their messages from the last N days (0-7)",
+    delete_messages="Also delete their recent messages",
 )
+@app_commands.choices(delete_messages=[
+    app_commands.Choice(name="don't delete any", value=0),
+    app_commands.Choice(name="previous hour", value=3600),
+    app_commands.Choice(name="previous 6 hours", value=6 * 3600),
+    app_commands.Choice(name="previous 12 hours", value=12 * 3600),
+    app_commands.Choice(name="previous 24 hours", value=24 * 3600),
+    app_commands.Choice(name="previous 3 days", value=3 * 86400),
+    app_commands.Choice(name="previous 7 days", value=7 * 86400),
+])
 async def ban_command(
     interaction: discord.Interaction,
     user: discord.User,
+    duration: str | None = None,
     reason: str | None = None,
-    delete_message_days: app_commands.Range[int, 0, 7] = 0,
+    delete_messages: app_commands.Choice[int] | None = None,
 ):
     guild = guild_only(interaction)
     moderator = interaction.user
+
+    try:
+        delta = parse_duration(duration)
+    except ValueError:
+        await interaction.response.send_message("❌ I couldn't read that duration. Use things like `30m`, `12h`, `7d`, `2w`, or `1w2d` (minimum 1 minute) — or leave it blank for a permanent ban.", ephemeral=True)
+        return
 
     if user.id == moderator.id:
         await interaction.response.send_message("❌ You can't ban yourself.", ephemeral=True)
@@ -3361,15 +3416,15 @@ async def ban_command(
             await interaction.response.send_message("⚠️ I can't ban them — their highest role is equal to or above mine. Move my role higher in Server Settings → Roles.", ephemeral=True)
             return
 
-    audit_reason = f"{reason or 'No reason given'} (banned by {moderator} [{moderator.id}])"[:512]
+    delete_seconds = delete_messages.value if delete_messages else 0
+    unban_at = datetime.now(timezone.utc) + delta if delta else None
+
+    audit_reason = f"{reason or 'No reason given'} (banned by {moderator} [{moderator.id}]"
+    audit_reason += f", unbans {unban_at.strftime('%Y-%m-%d %H:%M UTC')})" if unban_at else ")"
 
     await interaction.response.defer()
     try:
-        await guild.ban(
-            user,
-            reason=audit_reason,
-            delete_message_seconds=delete_message_days * 86400,
-        )
+        await guild.ban(user, reason=audit_reason[:512], delete_message_seconds=delete_seconds)
     except discord.Forbidden:
         await interaction.followup.send("⚠️ I don't have permission to ban that user (I need the Ban Members permission and a high enough role).", ephemeral=True)
         return
@@ -3380,12 +3435,81 @@ async def ban_command(
         await interaction.followup.send(f"⚠️ Couldn't ban them: {str(e)[:150]}", ephemeral=True)
         return
 
+    # Record (or replace) the scheduled unban. Any earlier pending timer for
+    # this user is retired first so a re-ban with a new duration (or a
+    # permanent re-ban) can't be cut short by an old timer.
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE temp_bans SET done = 1 WHERE guild_id = ? AND user_id = ? AND done = 0", (guild.id, user.id))
+    if unban_at:
+        cur.execute(
+            "INSERT INTO temp_bans (guild_id, user_id, unban_time, done) VALUES (?, ?, ?, 0)",
+            (guild.id, user.id, unban_at.isoformat()),
+        )
+    conn.commit()
+    conn.close()
+
     msg = f"{CHECK} Banned **{user}** (`{user.id}`)."
+    if unban_at:
+        msg += f"\n**Duration:** unbans <t:{int(unban_at.timestamp())}:R>"
+    else:
+        msg += "\n**Duration:** permanent"
     if reason:
         msg += f"\n**Reason:** {reason}"
-    if delete_message_days:
-        msg += f"\n**Messages deleted:** last {delete_message_days} day(s)"
+    if delete_seconds:
+        msg += f"\n**Messages deleted:** {delete_messages.name}"
     await interaction.followup.send(msg)
+
+
+@tasks.loop(seconds=TEMPBAN_CHECK_INTERVAL_SECONDS)
+async def check_temp_bans():
+    """Lifts temporary bans whose time is up. Runs on a plain interval (like
+    the fast pass timers) so pending unbans survive a bot restart — anything
+    overdue just gets lifted the next time this runs."""
+    now = datetime.now(timezone.utc)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM temp_bans WHERE done = 0")
+    rows = cur.fetchall()
+    conn.close()
+
+    for row in rows:
+        try:
+            unban_time = datetime.fromisoformat(row["unban_time"])
+        except Exception as e:
+            print(f"[DEBUG] Bad unban_time on temp ban #{row['id']}: {e}")
+            continue
+        if now < unban_time:
+            continue
+
+        guild = bot.get_guild(row["guild_id"])
+        if not guild:
+            continue
+
+        finished = False
+        try:
+            await guild.unban(discord.Object(id=row["user_id"]), reason="Temporary ban expired")
+            finished = True
+            print(f"[DEBUG] Lifted temp ban #{row['id']} for user {row['user_id']} in guild {guild.id}")
+        except discord.NotFound:
+            # Already unbanned by hand — nothing left to do.
+            finished = True
+        except discord.Forbidden:
+            print(f"[DEBUG] Missing permission to unban {row['user_id']} in guild {guild.id}; will retry")
+        except Exception as e:
+            print(f"[DEBUG] Failed to lift temp ban #{row['id']}: {e!r}")
+
+        if finished:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("UPDATE temp_bans SET done = 1 WHERE id = ?", (row["id"],))
+            conn.commit()
+            conn.close()
+
+
+@check_temp_bans.before_loop
+async def before_check_temp_bans():
+    await bot.wait_until_ready()
 
 
 # ------------------------------------------------------------
