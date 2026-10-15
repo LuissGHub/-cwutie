@@ -3322,6 +3322,73 @@ async def removeuser(interaction: discord.Interaction, user: discord.Member):
 
 
 # ------------------------------------------------------------
+# Commands — Moderation (ban)
+# ------------------------------------------------------------
+
+@bot.tree.command(name="ban", description="Ban a user from the server")
+@app_commands.checks.has_permissions(ban_members=True)
+@app_commands.describe(
+    user="User to ban (you can also paste a user ID to ban someone who already left)",
+    reason="Why they're being banned (saved in the audit log)",
+    delete_message_days="Also delete their messages from the last N days (0-7)",
+)
+async def ban_command(
+    interaction: discord.Interaction,
+    user: discord.User,
+    reason: str | None = None,
+    delete_message_days: app_commands.Range[int, 0, 7] = 0,
+):
+    guild = guild_only(interaction)
+    moderator = interaction.user
+
+    if user.id == moderator.id:
+        await interaction.response.send_message("❌ You can't ban yourself.", ephemeral=True)
+        return
+    if bot.user and user.id == bot.user.id:
+        await interaction.response.send_message("❌ I can't ban myself.", ephemeral=True)
+        return
+    if user.id == guild.owner_id:
+        await interaction.response.send_message("❌ You can't ban the server owner.", ephemeral=True)
+        return
+
+    # Role hierarchy checks only apply if they're still in the server.
+    target_member = guild.get_member(user.id)
+    if target_member is not None:
+        if moderator.id != guild.owner_id and target_member.top_role >= moderator.top_role:
+            await interaction.response.send_message("❌ You can't ban someone whose highest role is equal to or above yours.", ephemeral=True)
+            return
+        if target_member.top_role >= guild.me.top_role:
+            await interaction.response.send_message("⚠️ I can't ban them — their highest role is equal to or above mine. Move my role higher in Server Settings → Roles.", ephemeral=True)
+            return
+
+    audit_reason = f"{reason or 'No reason given'} (banned by {moderator} [{moderator.id}])"[:512]
+
+    await interaction.response.defer()
+    try:
+        await guild.ban(
+            user,
+            reason=audit_reason,
+            delete_message_seconds=delete_message_days * 86400,
+        )
+    except discord.Forbidden:
+        await interaction.followup.send("⚠️ I don't have permission to ban that user (I need the Ban Members permission and a high enough role).", ephemeral=True)
+        return
+    except discord.NotFound:
+        await interaction.followup.send("❌ I couldn't find that user.", ephemeral=True)
+        return
+    except discord.HTTPException as e:
+        await interaction.followup.send(f"⚠️ Couldn't ban them: {str(e)[:150]}", ephemeral=True)
+        return
+
+    msg = f"{CHECK} Banned **{user}** (`{user.id}`)."
+    if reason:
+        msg += f"\n**Reason:** {reason}"
+    if delete_message_days:
+        msg += f"\n**Messages deleted:** last {delete_message_days} day(s)"
+    await interaction.followup.send(msg)
+
+
+# ------------------------------------------------------------
 # Commands — Showcase
 # ------------------------------------------------------------
 
