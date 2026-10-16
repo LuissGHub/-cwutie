@@ -3927,7 +3927,7 @@ EXTRA_COPY_PRICE = (1, 100)     # (usd, robux), per extra copy
     custom_charms="Add custom charms? (optional)",
     text_designs="Add text designs? (optional)",
     upload="Upload option (optional)",
-    body_change="How many body changes? Same design on a different model, $1 / 100 robux each (optional)",
+    body_change="Add a body change? Same design on a different model (optional)",
     extra_copy="How many extra copies? $1 / 100 robux each (optional)",
     discount="Apply 10% discount?",
 )
@@ -3935,6 +3935,7 @@ EXTRA_COPY_PRICE = (1, 100)     # (usd, robux), per extra copy
     item=[app_commands.Choice(name=v[0], value=k) for k, v in PRICE_ITEMS.items()],
     custom_charms=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
     text_designs=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
+    body_change=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
     upload=[app_commands.Choice(name=v[0], value=k) for k, v in UPLOAD_OPTIONS.items()],
     discount=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
 )
@@ -3944,7 +3945,7 @@ async def price_command(
     custom_charms: str = "no",
     text_designs: str = "no",
     upload: str | None = None,
-    body_change: app_commands.Range[int, 0, 50] = 0,
+    body_change: str = "no",
     extra_copy: app_commands.Range[int, 0, 50] = 0,
     discount: str = "no",
 ):
@@ -3957,9 +3958,8 @@ async def price_command(
         rows.append(("text designs", TEXT_DESIGN_PRICE[0], TEXT_DESIGN_PRICE[1]))
     if upload:
         rows.append(UPLOAD_OPTIONS[upload])
-    if body_change > 0:
-        label = "body change" if body_change == 1 else f"body change x{body_change}"
-        rows.append((label, BODY_CHANGE_PRICE[0] * body_change, BODY_CHANGE_PRICE[1] * body_change))
+    if body_change == "yes":
+        rows.append(("body change", BODY_CHANGE_PRICE[0], BODY_CHANGE_PRICE[1]))
     if extra_copy > 0:
         label = "extra copy" if extra_copy == 1 else f"extra copy x{extra_copy}"
         rows.append((label, EXTRA_COPY_PRICE[0] * extra_copy, EXTRA_COPY_PRICE[1] * extra_copy))
