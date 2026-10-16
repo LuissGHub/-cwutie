@@ -94,6 +94,32 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
+def db_one(sql, params=()):
+    conn = get_db()
+    try:
+        return conn.execute(sql, params).fetchone()
+    finally:
+        conn.close()
+
+
+def db_all(sql, params=()):
+    conn = get_db()
+    try:
+        return conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+
+
+def db_run(sql, params=()):
+    conn = get_db()
+    try:
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 def restore_saved_embeds_if_migrated(cur: sqlite3.Cursor) -> None:
     cur.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'saved_embeds'")
     if cur.fetchone():
@@ -298,11 +324,7 @@ def upsert_settings(guild_id: int, **kwargs) -> None:
 
 
 def get_settings(guild_id: int) -> sqlite3.Row | None:
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM settings WHERE guild_id = ?", (guild_id,))
-    row = cur.fetchone()
-    conn.close()
+    row = db_one("SELECT * FROM settings WHERE guild_id = ?", (guild_id,))
     return row
 
 
@@ -387,7 +409,7 @@ def parse_button(button: str | None):
     first = parts[0]
 
     if len(parts) > 1 and _looks_like_emoji_token(first):
-        # "<emoji> label text" — split into emoji + label
+        # "<emoji> label text" - split into emoji + label
         return parts[1], first
 
     if len(parts) == 1 and _looks_like_emoji_token(first):
@@ -515,12 +537,12 @@ async def fetch_image_file(image_url: str) -> discord.File | None:
         async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
             async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
-                    print(f"[DEBUG] Image download failed ({resp.status}) for {image_url}")
+                    print(f"Image download failed ({resp.status}) for {image_url}")
                     return None
                 content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
                 data = await resp.read()
         if len(data) > PLAIN_IMAGE_MAX_BYTES:
-            print(f"[DEBUG] Image too large to re-upload ({len(data)} bytes): {image_url}")
+            print(f"Image too large to re-upload ({len(data)} bytes): {image_url}")
             return None
         name = image_url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1] or "image"
         ext_by_type = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
@@ -531,7 +553,7 @@ async def fetch_image_file(image_url: str) -> discord.File | None:
             name += ".png"
         return discord.File(io.BytesIO(data), filename=name)
     except Exception as e:
-        print(f"[DEBUG] Failed to download image {image_url}: {e!r}")
+        print(f"Failed to download image {image_url}: {e!r}")
         return None
 
 
@@ -744,9 +766,9 @@ async def detect_ticket_opener_from_ping(channel: discord.TextChannel, ignore_id
                 if member:
                     return member
     except discord.Forbidden:
-        print(f"[DEBUG] Missing permission to read message history for ticket channel {channel.id}")
+        print(f"Missing permission to read message history for ticket channel {channel.id}")
     except Exception as e:
-        print(f"[DEBUG] Failed to read opening messages for ticket channel {channel.id}: {e}")
+        print(f"Failed to read opening messages for ticket channel {channel.id}: {e}")
     return None
 
 
@@ -776,7 +798,7 @@ async def remove_waitlist_entry_by_channel(bot, guild_id: int, channel_id: int) 
 class EmbedModal(discord.ui.Modal, title="Create Embed"):
     embed_title = discord.ui.TextInput(label="Title", required=False, max_length=256, placeholder="e.g.  server rules")
     description = discord.ui.TextInput(label="Description", style=discord.TextStyle.paragraph, required=False, max_length=4000, placeholder="e.g.  welcome to cwtie ugc! ♡")
-    theme = discord.ui.TextInput(label="Color — theme name or hex", required=False, max_length=20, default="pink", placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
+    theme = discord.ui.TextInput(label="Color - theme name or hex", required=False, max_length=20, default="pink", placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
     image = discord.ui.TextInput(label="Big image URL (bottom of embed)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.png")
     thumbnail = discord.ui.TextInput(label="Small image URL (top-right corner)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/xyz456.png")
 
@@ -820,11 +842,7 @@ class EmbedModal(discord.ui.Modal, title="Create Embed"):
 
         if self.save_name and guild_id:
             now = datetime.now(timezone.utc).isoformat()
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute("SELECT id FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild_id, self.save_name))
-            existing = cur.fetchone()
-            conn.close()
+            existing = db_one("SELECT id FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild_id, self.save_name))
 
             if existing and not self.is_edit:
                 await interaction.response.send_message(f"An embed named **{self.save_name}** already exists!\nUse `/embededit {self.save_name}` to edit it.", ephemeral=True)
@@ -858,7 +876,7 @@ class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
     outside_text = discord.ui.TextInput(label="Text ABOVE the embed (optional)", required=False, max_length=2000, placeholder="e.g.  thank you {mention} !")
     welcome_title = discord.ui.TextInput(label="Embed title (optional)", required=False, max_length=256, placeholder="e.g.  🐇 welcome to cwtie ugc!")
     welcome_text = discord.ui.TextInput(label="Embed description text", style=discord.TextStyle.paragraph, required=True, max_length=2000, placeholder="e.g.  🐇 welcome {mention} to cwtie ugc! ♡")
-    theme = discord.ui.TextInput(label="Color — theme name or hex", required=False, max_length=20, placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
+    theme = discord.ui.TextInput(label="Color - theme name or hex", required=False, max_length=20, placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
     banner_url = discord.ui.TextInput(label="Banner image URL (big image at bottom)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.gif")
 
     def __init__(self, prefill: dict | None = None):
@@ -899,7 +917,7 @@ class WelcomeEditModal(discord.ui.Modal, title="Edit Welcome Settings"):
 
 class RedeemTemplateModal(discord.ui.Modal, title="Redeem Message Template"):
     template = discord.ui.TextInput(
-        label="Message — use {code} where the code goes",
+        label="Message - use {code} where the code goes",
         style=discord.TextStyle.paragraph,
         required=True,
         max_length=1900,
@@ -938,7 +956,7 @@ class RedeemTemplateModal(discord.ui.Modal, title="Redeem Message Template"):
 
         msg = f"{CHECK} Redeem template {action}! Use `/lim code:<the code>` to send it."
         if "{code}" not in template_val:
-            msg += "\nHeads up — I didn't see `{code}` anywhere in that template, so any code you pass into `/redeem` won't actually show up."
+            msg += "\nHeads up - I didn't see `{code}` anywhere in that template, so any code you pass into `/redeem` won't actually show up."
         await interaction.response.send_message(msg, ephemeral=True)
 
 
@@ -948,9 +966,9 @@ class ShowcaseSetupModal(discord.ui.Modal, title="Showcase Template"):
         style=discord.TextStyle.paragraph,
         required=True,
         max_length=4000,
-        placeholder="The decorative header block — reused every showcase post",
+        placeholder="The decorative header block - reused every showcase post",
     )
-    theme = discord.ui.TextInput(label="Color — theme name or hex", required=False, max_length=20, placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
+    theme = discord.ui.TextInput(label="Color - theme name or hex", required=False, max_length=20, placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
     image2_url = discord.ui.TextInput(label="2nd embed image URL (fixed)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.gif")
     image3_url = discord.ui.TextInput(label="3rd embed image URL (fixed, optional)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/xyz456.gif")
 
@@ -1055,7 +1073,7 @@ class WaitlistRemoveView(discord.ui.View):
             channel = guild.get_channel(int(cid))
             display = f"#{channel.name}" if channel else f"unknown ({cid})"
             if label:
-                display += f" — {label}"
+                display += f" - {label}"
             options.append(discord.SelectOption(label=display[:100], value=cid))
         self.add_item(WaitlistRemoveSelect(options))
 
@@ -1070,7 +1088,7 @@ class WaitlistMovePickSelect(discord.ui.Select):
             lbl = entry_label(e)
             ch = guild.get_channel(int(cid))
             ch_name = f"#{ch.name}" if ch else f"unknown ({cid})"
-            suffix = f" — {lbl}" if lbl else ""
+            suffix = f" - {lbl}" if lbl else ""
             options.append(discord.SelectOption(label=f"{i}) {ch_name}{suffix}"[:100], value=cid))
         super().__init__(placeholder="Pick an entry to move...", options=options)
 
@@ -1101,7 +1119,7 @@ class WaitlistMovePositionSelect(discord.ui.Select):
             lbl = entry_label(e)
             ch = guild.get_channel(int(cid))
             ch_name = f"#{ch.name}" if ch else f"unknown ({cid})"
-            suffix = f" — {lbl}" if lbl else ""
+            suffix = f" - {lbl}" if lbl else ""
             options.append(discord.SelectOption(label=f"Slot {i}", description=f"Currently: {ch_name}{suffix}"[:100], value=str(i)))
         super().__init__(placeholder="Pick the new position...", options=options)
 
@@ -1231,19 +1249,15 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     if not isinstance(channel, discord.TextChannel):
         return
 
-    print(f"[DEBUG] on_guild_channel_create fired for #{channel.name} ({channel.id}) in category {channel.category.id if channel.category else None}")
 
     settings = get_settings(channel.guild.id)
     if not settings or not settings["ticket_category_id"] or not settings["ticket_name_prefix"]:
-        print(f"[DEBUG] Skipping #{channel.name}: no ticket_category_id/ticket_name_prefix configured (run /waitlist_ticket_config)")
         return
 
     if not channel.category or str(channel.category.id) != str(settings["ticket_category_id"]):
-        print(f"[DEBUG] Skipping #{channel.name}: category {channel.category.id if channel.category else None} != configured {settings['ticket_category_id']}")
         return
 
     if not channel.name.lower().startswith(settings["ticket_name_prefix"].lower()):
-        print(f"[DEBUG] Skipping #{channel.name}: name doesn't start with configured prefix '{settings['ticket_name_prefix']}'")
         return
 
     ignore_ids = ALWAYS_IGNORE_TICKET_USER_IDS | {int(u) for u in (settings["ticket_ignore_user_ids"] or "").split(",") if u.strip()}
@@ -1255,7 +1269,6 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
     owner_member = await detect_ticket_opener_from_ping(channel, ignore_ids)
     if owner_member:
         owner_id = owner_member.id
-        print(f"[DEBUG] Ticket channel {channel.id}: owner detected from opening message ping ({owner_member.id})")
     else:
         try:
             member_overwrites = [
@@ -1265,22 +1278,19 @@ async def on_guild_channel_create(channel: discord.abc.GuildChannel):
             if len(member_overwrites) == 1:
                 owner_member = member_overwrites[0]
                 owner_id = owner_member.id
-                print(f"[DEBUG] Ticket channel {channel.id}: owner detected from permission-overwrite fallback ({owner_member.id})")
-            else:
-                print(f"[DEBUG] Ticket channel {channel.id}: found {len(member_overwrites)} non-bot, non-ignored member overwrite(s) ({[m.id for m in member_overwrites]}), can't tell who owns it")
         except Exception as e:
-            print(f"[DEBUG] Failed to inspect overwrites for new ticket channel {channel.id}: {e}")
+            print(f"Failed to inspect overwrites for new ticket channel {channel.id}: {e}")
 
     try:
         await add_waitlist_entry_for_channel(bot, channel.guild.id, channel.id, owner_id)
     except Exception as e:
-        print(f"[DEBUG] Failed to auto-add waitlist entry for new ticket channel {channel.id}: {e}")
+        print(f"Failed to auto-add waitlist entry for new ticket channel {channel.id}: {e}")
 
     if owner_member and owner_member.premium_since:
         try:
             await channel.send("reminder this person is boosting 🫧🪽🍓")
         except Exception as e:
-            print(f"[DEBUG] Failed to send booster reminder in new ticket channel {channel.id}: {e}")
+            print(f"Failed to send booster reminder in new ticket channel {channel.id}: {e}")
 
 
 @bot.event
@@ -1290,7 +1300,7 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
     try:
         await remove_waitlist_entry_by_channel(bot, channel.guild.id, channel.id)
     except Exception as e:
-        print(f"[DEBUG] Failed to auto-remove waitlist entry for deleted channel {channel.id}: {e}")
+        print(f"Failed to auto-remove waitlist entry for deleted channel {channel.id}: {e}")
 
 
 @bot.event
@@ -1350,7 +1360,7 @@ async def on_member_remove(member: discord.Member):
     except discord.NotFound:
         pass
     except discord.HTTPException as e:
-        print(f"[DEBUG] Quick-leave: couldn't check bans for {member.id}: {e!r}")
+        print(f"Quick-leave: couldn't check bans for {member.id}: {e!r}")
         return
 
     try:
@@ -1364,14 +1374,10 @@ async def on_member_remove(member: discord.Member):
     try:
         await guild.ban(member, reason=reason, delete_message_seconds=0)
     except discord.HTTPException as e:
-        print(f"[DEBUG] Quick-leave: failed to ban {member.id}: {e!r}")
+        print(f"Quick-leave: failed to ban {member.id}: {e!r}")
         return
 
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("UPDATE temp_bans SET done = 1 WHERE guild_id = ? AND user_id = ? AND done = 0", (guild.id, member.id))
-    conn.commit()
-    conn.close()
+    db_run("UPDATE temp_bans SET done = 1 WHERE guild_id = ? AND user_id = ? AND done = 0", (guild.id, member.id))
 
     log_channel = guild.get_channel(int(settings["quickleave_log_channel_id"])) if settings["quickleave_log_channel_id"] else None
     if not log_channel:
@@ -1388,7 +1394,7 @@ async def on_member_remove(member: discord.Member):
     try:
         await log_channel.send(embed=embed)
     except discord.HTTPException as e:
-        print(f"[DEBUG] Quick-leave: failed to send log: {e!r}")
+        print(f"Quick-leave: failed to send log: {e!r}")
 
 
 @bot.event
@@ -1441,7 +1447,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                         await asyncio.sleep(0.1)
                         await boost_msg.add_reaction(emoji)
                 except Exception as e:
-                    print(f"[DEBUG] Failed to auto-react to boost message with {emoji}: {e}")
+                    print(f"Failed to auto-react to boost message with {emoji}: {e}")
 
 
 @bot.event
@@ -1460,11 +1466,7 @@ async def on_message(message: discord.Message):
     if settings and settings["autoreact_channel_id"]:
         autoreact_channel_ids = {int(c) for c in settings["autoreact_channel_id"].split(",") if c.strip()}
         if message.channel.id in autoreact_channel_ids:
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute("SELECT last_message_id FROM sticky_messages WHERE guild_id = ? AND channel_id = ?", (message.guild.id, message.channel.id))
-            sticky_row = cur.fetchone()
-            conn.close()
+            sticky_row = db_one("SELECT last_message_id FROM sticky_messages WHERE guild_id = ? AND channel_id = ?", (message.guild.id, message.channel.id))
 
             is_sticky = sticky_row and sticky_row["last_message_id"] == message.id
 
@@ -1483,7 +1485,7 @@ async def on_message(message: discord.Message):
                                 await asyncio.sleep(0.1)
                                 await message.add_reaction(emoji)
                         except Exception as e:
-                            print(f"[DEBUG] Failed to auto-react with {emoji}: {e}")
+                            print(f"Failed to auto-react with {emoji}: {e}")
 
     if (
         settings
@@ -1502,7 +1504,7 @@ async def on_message(message: discord.Message):
                     try:
                         await message.add_reaction(emoji)
                     except Exception as e:
-                        print(f"[DEBUG] Failed to auto-react to user mention with {emoji}: {e}")
+                        print(f"Failed to auto-react to user mention with {emoji}: {e}")
 
     if settings and settings["vouch_channel_id"] and message.channel.id == int(settings["vouch_channel_id"]):
         waitlist_role = message.guild.get_role(int(settings["waitlist_role_id"])) if settings["waitlist_role_id"] else None
@@ -1510,7 +1512,7 @@ async def on_message(message: discord.Message):
             try:
                 await message.author.remove_roles(waitlist_role)
             except discord.Forbidden as e:
-                print(f"[DEBUG] Failed to remove waitlist role from {message.author.id}: {e}")
+                print(f"Failed to remove waitlist role from {message.author.id}: {e}")
 
             vouch_data = load_waitlists()
             vouch_key = get_waitlist_key(message.guild.id)
@@ -1532,18 +1534,12 @@ async def on_message(message: discord.Message):
                             matches.append(cid)
                     if len(matches) == 1:
                         await remove_waitlist_entry_by_channel(bot, message.guild.id, int(matches[0]))
-                    elif len(matches) > 1:
-                        print(f"[DEBUG] Vouch from {message.author.id} matched multiple waitlist entries {matches}; skipped auto-removal")
 
     content = message.content.strip()
     content_lower = content.lower()
 
     # Autoresponders
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT trigger, message, ping_roles, match_type FROM autoresponders WHERE guild_id = ?", (message.guild.id,))
-    all_ars = cur.fetchall()
-    conn.close()
+    all_ars = db_all("SELECT trigger, message, ping_roles, match_type FROM autoresponders WHERE guild_id = ?", (message.guild.id,))
 
     for ar in all_ars:
         if check_trigger(content_lower, ar["trigger"], ar["match_type"] or "exact"):
@@ -1555,26 +1551,18 @@ async def on_message(message: discord.Message):
             break
 
     # Image responders
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM image_responders WHERE guild_id = ?", (message.guild.id,))
-    all_imgs = cur.fetchall()
-    conn.close()
+    all_imgs = db_all("SELECT * FROM image_responders WHERE guild_id = ?", (message.guild.id,))
 
     for img in all_imgs:
         if check_trigger(content_lower, img["trigger"], img["match_type"] or "exact"):
             try:
                 await post_image_responder(message.channel, img)
             except Exception as e:
-                print(f"[DEBUG] Failed to send image responder '{img['trigger']}': {e!r}")
+                print(f"Failed to send image responder '{img['trigger']}': {e!r}")
             break
 
     # Sticky messages
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT message, last_message_id FROM sticky_messages WHERE guild_id = ? AND channel_id = ?", (message.guild.id, message.channel.id))
-    row = cur.fetchone()
-    conn.close()
+    row = db_one("SELECT message, last_message_id FROM sticky_messages WHERE guild_id = ? AND channel_id = ?", (message.guild.id, message.channel.id))
 
     if not row:
         return
@@ -1590,15 +1578,11 @@ async def on_message(message: discord.Message):
 
     new_msg = await message.channel.send(row["message"].replace("\\n", "\n").replace("{mention}", message.author.mention))
 
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("UPDATE sticky_messages SET last_message_id = ? WHERE guild_id = ? AND channel_id = ?", (new_msg.id, message.guild.id, message.channel.id))
-    conn.commit()
-    conn.close()
+    db_run("UPDATE sticky_messages SET last_message_id = ? WHERE guild_id = ? AND channel_id = ?", (new_msg.id, message.guild.id, message.channel.id))
 
 
 # ------------------------------------------------------------
-# Commands — Embeds
+# Commands - Embeds
 # ------------------------------------------------------------
 
 @bot.tree.command(name="embed", description="Create and post a custom embed in this channel")
@@ -1633,11 +1617,7 @@ async def embed_command(interaction: discord.Interaction, title: str | None = No
 @bot.tree.command(name="embedlist", description="List all saved embeds")
 async def embedlist(interaction: discord.Interaction):
     guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT name, embed_title, post_channel_id, updated_at FROM saved_embeds WHERE guild_id = ? ORDER BY name", (guild.id,))
-    rows = cur.fetchall()
-    conn.close()
+    rows = db_all("SELECT name, embed_title, post_channel_id, updated_at FROM saved_embeds WHERE guild_id = ? ORDER BY name", (guild.id,))
 
     if not rows:
         await interaction.response.send_message("No saved embeds yet. Use `/embed save_name:myname` to save one.", ephemeral=True)
@@ -1665,11 +1645,7 @@ async def embedlist(interaction: discord.Interaction):
 @app_commands.describe(name="Name of the embed")
 async def embedpost(interaction: discord.Interaction, name: str):
     guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
-    row = cur.fetchone()
-    conn.close()
+    row = db_one("SELECT * FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
 
     if not row:
         await interaction.response.send_message(f"No embed named **{name}**. Use `/embedlist`.", ephemeral=True)
@@ -1684,11 +1660,7 @@ async def embedpost(interaction: discord.Interaction, name: str):
 @app_commands.describe(name="Name of the embed to edit")
 async def embededit(interaction: discord.Interaction, name: str):
     guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
-    row = cur.fetchone()
-    conn.close()
+    row = db_one("SELECT * FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
 
     if not row:
         await interaction.response.send_message(f"No embed named **{name}**.", ephemeral=True)
@@ -1723,19 +1695,14 @@ async def embedchannel(interaction: discord.Interaction, name: str, channel: dis
 @app_commands.describe(name="Name of the embed to delete")
 async def embeddelete(interaction: discord.Interaction, name: str):
     guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
-    deleted = cur.rowcount
-    conn.commit()
-    conn.close()
+    deleted = db_run("DELETE FROM saved_embeds WHERE guild_id = ? AND name = ?", (guild.id, name))
 
     msg = f"Deleted **{name}**." if deleted else f"No embed named **{name}**."
     await interaction.response.send_message(msg, ephemeral=True)
 
 
 # ------------------------------------------------------------
-# Commands — Welcome
+# Commands - Welcome
 # ------------------------------------------------------------
 
 @bot.tree.command(name="welcome_setup", description="Set up the welcome message")
@@ -1851,7 +1818,7 @@ async def themes(interaction: discord.Interaction):
 
 
 # ------------------------------------------------------------
-# Commands — Boost
+# Commands - Boost
 # ------------------------------------------------------------
 
 @bot.tree.command(name="set_boost_channel", description="Set the channel for boost announcements")
@@ -1992,7 +1959,7 @@ async def boost_reaction_clear(interaction: discord.Interaction):
 
 
 # ------------------------------------------------------------
-# Commands — Verify
+# Commands - Verify
 # ------------------------------------------------------------
 
 @bot.tree.command(name="verify_message", description="Create or edit the verify embed")
@@ -2069,7 +2036,7 @@ async def verify_responses(interaction: discord.Interaction, success_message: st
 
 
 # ------------------------------------------------------------
-# Commands — Autoreact
+# Commands - Autoreact
 # ------------------------------------------------------------
 
 @bot.tree.command(name="autoreact_setup", description="Set up auto-reaction in one or more channels")
@@ -2154,7 +2121,7 @@ async def autoreact_channel_remove(interaction: discord.Interaction, channels: s
         display = " ".join(c.mention for c in guild_channels if c)
         msg = f"{CHECK} Removed. Autoreact channels are now: {display}"
     else:
-        msg = f"{CHECK} Removed. No autoreact channels remain — auto-reaction is now off."
+        msg = f"{CHECK} Removed. No autoreact channels remain - auto-reaction is now off."
     if invalid:
         msg += f"\nSkipped (not found): {', '.join(invalid)}"
     await interaction.response.send_message(msg, ephemeral=True)
@@ -2185,7 +2152,7 @@ async def autoreact_clear(interaction: discord.Interaction):
 
 
 # ------------------------------------------------------------
-# Commands — User Mention Reactions
+# Commands - User Mention Reactions
 # ------------------------------------------------------------
 
 @bot.tree.command(name="usermention_setup", description="React with emojis whenever someone @'s a specific user")
@@ -2233,7 +2200,7 @@ async def usermention_clear(interaction: discord.Interaction):
 
 
 # ------------------------------------------------------------
-# Commands — Sticky
+# Commands - Sticky
 # ------------------------------------------------------------
 
 @bot.tree.command(name="sticky_set", description="Set a sticky message for this channel")
@@ -2241,11 +2208,7 @@ async def usermention_clear(interaction: discord.Interaction):
 @app_commands.describe(message="Message to pin at the bottom")
 async def sticky_set(interaction: discord.Interaction, message: str):
     guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("INSERT OR REPLACE INTO sticky_messages (guild_id, channel_id, message) VALUES (?, ?, ?)", (guild.id, interaction.channel_id, message))
-    conn.commit()
-    conn.close()
+    db_run("INSERT OR REPLACE INTO sticky_messages (guild_id, channel_id, message) VALUES (?, ?, ?)", (guild.id, interaction.channel_id, message))
     await interaction.response.send_message(f"{CHECK} Sticky message set for this channel!", ephemeral=True)
 
 
@@ -2253,22 +2216,14 @@ async def sticky_set(interaction: discord.Interaction, message: str):
 @app_commands.checks.has_permissions(manage_messages=True)
 async def sticky_clear(interaction: discord.Interaction):
     guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM sticky_messages WHERE guild_id = ? AND channel_id = ?", (guild.id, interaction.channel_id))
-    conn.commit()
-    conn.close()
+    db_run("DELETE FROM sticky_messages WHERE guild_id = ? AND channel_id = ?", (guild.id, interaction.channel_id))
     await interaction.response.send_message("Sticky message cleared.", ephemeral=True)
 
 
 @bot.tree.command(name="sticky_view", description="See the current sticky message for this channel")
 async def sticky_view(interaction: discord.Interaction):
     guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT message FROM sticky_messages WHERE guild_id = ? AND channel_id = ?", (guild.id, interaction.channel_id))
-    row = cur.fetchone()
-    conn.close()
+    row = db_one("SELECT message FROM sticky_messages WHERE guild_id = ? AND channel_id = ?", (guild.id, interaction.channel_id))
 
     if not row:
         await interaction.response.send_message("No sticky message set for this channel.", ephemeral=True)
@@ -2278,7 +2233,7 @@ async def sticky_view(interaction: discord.Interaction):
 
 
 # ------------------------------------------------------------
-# Commands — Autoresponder
+# Commands - Autoresponder
 # ------------------------------------------------------------
 
 @bot.tree.command(name="autoresponder_add", description="Create an autoresponder trigger")
@@ -2333,12 +2288,7 @@ async def autoresponder_edit(interaction: discord.Interaction, trigger: str, mes
 async def autoresponder_remove(interaction: discord.Interaction, trigger: str):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip().lstrip(".")
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM autoresponders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
-    deleted = cur.rowcount
-    conn.commit()
-    conn.close()
+    deleted = db_run("DELETE FROM autoresponders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
 
     msg = f"Autoresponder `{trigger}` deleted." if deleted else f"No autoresponder `{trigger}` found."
     await interaction.response.send_message(msg, ephemeral=True)
@@ -2348,11 +2298,7 @@ async def autoresponder_remove(interaction: discord.Interaction, trigger: str):
 @app_commands.checks.has_permissions(manage_guild=True)
 async def autoresponder_list(interaction: discord.Interaction):
     guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT trigger, message, match_type FROM autoresponders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
-    rows = cur.fetchall()
-    conn.close()
+    rows = db_all("SELECT trigger, message, match_type FROM autoresponders WHERE guild_id = ? ORDER BY trigger", (guild.id,))
 
     if not rows:
         await interaction.response.send_message("No autoresponders set up yet.", ephemeral=True)
@@ -2361,28 +2307,28 @@ async def autoresponder_list(interaction: discord.Interaction):
     embed = discord.Embed(title="Autoresponders", color=get_theme_color("pink"))
     for row in rows:
         preview = row["message"][:60] + ("..." if len(row["message"]) > 60 else "")
-        embed.add_field(name=f"`{row['trigger']}` — {row['match_type'] or 'exact'}", value=preview, inline=False)
+        embed.add_field(name=f"`{row['trigger']}` - {row['match_type'] or 'exact'}", value=preview, inline=False)
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ------------------------------------------------------------
-# Commands — Image Responder (also replaces the old saved-embed commands)
+# Commands - Image Responder (also replaces the old saved-embed commands)
 # ------------------------------------------------------------
 
 @bot.tree.command(name="imageresponder_add", description="Post an embed or image when a keyword is triggered")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
-    trigger="Keyword (no leading dot needed — with 'exact' match people type .keyword)",
+    trigger="Keyword (no leading dot needed - with 'exact' match people type .keyword)",
     image_url="Image / gif URL (optional if you give a title or caption)",
     title="Embed title (embed mode only)",
     caption="Caption text (embed description, or text above the image if not an embed)",
     match_type="Match type",
     as_embed="True = post inside an embed (default). False = post the plain image with no embed box",
-    color="Embed color — theme name or hex (embed mode only)",
+    color="Embed color - theme name or hex (embed mode only)",
     thumbnail_url="Small image shown on the side/corner of the embed (embed mode only)",
     footer="Small text shown at the bottom of the embed (embed mode only)",
-    footer_icon="Small icon next to the footer text — custom emoji or image URL (embed mode only)",
+    footer_icon="Small icon next to the footer text - custom emoji or image URL (embed mode only)",
     image_url2="Optional 2nd image, posted as its own embed right after the first (embed mode only)",
 )
 @app_commands.choices(match_type=[app_commands.Choice(name="exact", value="exact"), app_commands.Choice(name="anywhere", value="anywhere")])
@@ -2396,11 +2342,7 @@ async def imageresponder_add(interaction: discord.Interaction, trigger: str, ima
         await interaction.response.send_message("Give me at least an image URL, a title, or a caption.", ephemeral=True)
         return
 
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM image_responders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
-    exists = cur.fetchone()
-    conn.close()
+    exists = db_one("SELECT id FROM image_responders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
     if exists:
         await interaction.response.send_message(f"Trigger `{trigger}` already exists. Use `/imageresponder_edit {trigger}` to change it.", ephemeral=True)
         return
@@ -2411,7 +2353,7 @@ async def imageresponder_add(interaction: discord.Interaction, trigger: str, ima
     if image_url:
         got = await fetch_image_data(image_url)
         if not got:
-            await interaction.followup.send("Couldn't download that image — the link may be expired, private, or over 8 MB. Re-upload it and paste a fresh link.", ephemeral=True)
+            await interaction.followup.send("Couldn't download that image - the link may be expired, private, or over 8 MB. Re-upload it and paste a fresh link.", ephemeral=True)
             return
         blob, blob_name = got
 
@@ -2450,21 +2392,17 @@ async def imageresponder_add(interaction: discord.Interaction, trigger: str, ima
     caption="New caption ('none' to remove)",
     match_type="New match type",
     as_embed="True = embed, False = plain image with no embed box",
-    color="New embed color — theme name or hex ('none' clears back to pink)",
+    color="New embed color - theme name or hex ('none' clears back to pink)",
     thumbnail_url="New small side image URL ('none' to remove)",
     footer="New footer text ('none' to remove)",
-    footer_icon="New footer icon — custom emoji or image URL ('none' to remove)",
+    footer_icon="New footer icon - custom emoji or image URL ('none' to remove)",
     image_url2="New 2nd image URL, posted as its own embed after the first ('none' to remove, embed mode only)",
 )
 @app_commands.choices(match_type=[app_commands.Choice(name="exact", value="exact"), app_commands.Choice(name="anywhere", value="anywhere")])
 async def imageresponder_edit(interaction: discord.Interaction, trigger: str, image_url: str | None = None, title: str | None = None, caption: str | None = None, match_type: str | None = None, as_embed: bool | None = None, color: str | None = None, thumbnail_url: str | None = None, footer: str | None = None, footer_icon: str | None = None, image_url2: str | None = None):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip().lstrip(".")
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM image_responders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
-    row = cur.fetchone()
-    conn.close()
+    row = db_one("SELECT * FROM image_responders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
 
     if not row:
         await interaction.response.send_message(f"No image responder `{trigger}` found.", ephemeral=True)
@@ -2515,7 +2453,7 @@ async def imageresponder_edit(interaction: discord.Interaction, trigger: str, im
         final_image_url2 = None if image_url2.lower() == "none" else image_url2
 
     if not (final_image or final_title or final_caption):
-        await interaction.response.send_message("That would leave the responder empty — it needs at least an image, a title, or a caption.", ephemeral=True)
+        await interaction.response.send_message("That would leave the responder empty - it needs at least an image, a title, or a caption.", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True)
@@ -2523,7 +2461,7 @@ async def imageresponder_edit(interaction: discord.Interaction, trigger: str, im
     if needs_download:
         got = await fetch_image_data(final_image)
         if not got:
-            await interaction.followup.send("Couldn't download that image — the link may be expired, private, or over 8 MB. Re-upload it and paste a fresh link. (Nothing was changed.)", ephemeral=True)
+            await interaction.followup.send("Couldn't download that image - the link may be expired, private, or over 8 MB. Re-upload it and paste a fresh link. (Nothing was changed.)", ephemeral=True)
             return
         final_blob, final_blob_name = got
 
@@ -2551,12 +2489,7 @@ async def imageresponder_edit(interaction: discord.Interaction, trigger: str, im
 async def imageresponder_remove(interaction: discord.Interaction, trigger: str):
     guild = guild_only(interaction)
     trigger = trigger.lower().strip().lstrip(".")
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM image_responders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
-    deleted = cur.rowcount
-    conn.commit()
-    conn.close()
+    deleted = db_run("DELETE FROM image_responders WHERE guild_id = ? AND trigger = ?", (guild.id, trigger))
 
     msg = f"Image responder `{trigger}` deleted." if deleted else f"No image responder `{trigger}` found."
     await interaction.response.send_message(msg, ephemeral=True)
@@ -2591,7 +2524,7 @@ async def imageresponder_list(interaction: discord.Interaction):
         is_embed = row["as_embed"] != 0
         title_text = f"\nTitle: {row['title'][:80]}" if is_embed and row["title"] else ""
         if row["image_url"]:
-            image_text = f"[image]({row['image_url']})" + ("" if row["has_copy"] else " no saved copy — re-save with /imageresponder_edit")
+            image_text = f"[image]({row['image_url']})" + ("" if row["has_copy"] else " no saved copy - re-save with /imageresponder_edit")
         else:
             image_text = "*(no image)*"
         caption_text = f"\nCaption: {row['caption'][:60]}" if row["caption"] else ""
@@ -2604,7 +2537,7 @@ async def imageresponder_list(interaction: discord.Interaction):
         else:
             thumb_text = color_text = footer_text = image2_text = ""
 
-        name = f"`{row['trigger']}` — {row['match_type'] or 'exact'}"[:256]
+        name = f"`{row['trigger']}` - {row['match_type'] or 'exact'}"[:256]
         value = f"{image_text}{title_text}{caption_text}{mode_text}{color_text}{thumb_text}{footer_text}{image2_text}"[:1024]
         size = len(name) + len(value)
 
@@ -2662,7 +2595,7 @@ class ImageResponderCleanupView(discord.ui.View):
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message("This isn't your menu.", ephemeral=True)
             return
-        await interaction.response.edit_message(content="Cancelled — nothing was deleted.", view=None)
+        await interaction.response.edit_message(content="Cancelled - nothing was deleted.", view=None)
 
 
 @bot.tree.command(name="imageresponder_cleanup", description="Find image responders that share a name with a saved embed, and delete them")
@@ -2682,7 +2615,7 @@ async def imageresponder_cleanup(interaction: discord.Interaction):
 
     matches = [t for t in responder_triggers if t in saved_names]
     if not matches:
-        await interaction.followup.send("No image responders share a name with a saved embed — nothing to clean up.", ephemeral=True)
+        await interaction.followup.send("No image responders share a name with a saved embed - nothing to clean up.", ephemeral=True)
         return
 
     listing = ", ".join(f"`{t}`" for t in matches)
@@ -2697,7 +2630,7 @@ async def imageresponder_cleanup(interaction: discord.Interaction):
 
 
 # ------------------------------------------------------------
-# Commands — Lim (redeem message template)
+# Commands - Lim (redeem message template)
 # ------------------------------------------------------------
 
 LIM_TEMPLATE_NAME = "default"
@@ -2706,11 +2639,7 @@ LIM_TEMPLATE_NAME = "default"
 @app_commands.checks.has_permissions(manage_guild=True)
 async def lim_set(interaction: discord.Interaction):
     guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT template FROM redeem_templates WHERE guild_id = ? AND name = ?", (guild.id, LIM_TEMPLATE_NAME))
-    row = cur.fetchone()
-    conn.close()
+    row = db_one("SELECT template FROM redeem_templates WHERE guild_id = ? AND name = ?", (guild.id, LIM_TEMPLATE_NAME))
     prefill = row["template"] if row else None
     await interaction.response.send_modal(RedeemTemplateModal(name=LIM_TEMPLATE_NAME, prefill=prefill))
 
@@ -2719,11 +2648,7 @@ async def lim_set(interaction: discord.Interaction):
 @app_commands.describe(code="The code to insert in place of {code}")
 async def lim_command(interaction: discord.Interaction, code: str):
     guild = guild_only(interaction)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT template FROM redeem_templates WHERE guild_id = ? AND name = ?", (guild.id, LIM_TEMPLATE_NAME))
-    row = cur.fetchone()
-    conn.close()
+    row = db_one("SELECT template FROM redeem_templates WHERE guild_id = ? AND name = ?", (guild.id, LIM_TEMPLATE_NAME))
 
     if not row:
         await interaction.response.send_message("No redeem template set yet. Use `/lim_set` first.", ephemeral=True)
@@ -2738,7 +2663,7 @@ async def lim_command(interaction: discord.Interaction, code: str):
 
 
 # ------------------------------------------------------------
-# Commands — Waitlist
+# Commands - Waitlist
 # ------------------------------------------------------------
 
 @bot.tree.command(name="waitlist_create", description="Create a waitlist")
@@ -2777,7 +2702,7 @@ async def waitlist_add(interaction: discord.Interaction, channel: discord.TextCh
     data[key]["users"].append(entry)
     save_waitlists(data)
     await update_waitlist_message(bot, interaction.guild.id)
-    suffix = f" — {label}" if label else ""
+    suffix = f" - {label}" if label else ""
     if user:
         suffix += f" (linked to {user.mention})"
     await interaction.response.send_message(f"{CHECK} Added {channel.mention}{suffix}", ephemeral=True)
@@ -2845,7 +2770,7 @@ async def waitlist_remove(interaction: discord.Interaction):
 @app_commands.describe(
     category="Category your ticket bot creates tickets under",
     prefix="Name prefix tickets start with (e.g. ticket-)",
-    ignore_users="Staff who get individual access on EVERY ticket (e.g. the owner), space-separated — so they're not mistaken for the customer",
+    ignore_users="Staff who get individual access on EVERY ticket (e.g. the owner), space-separated - so they're not mistaken for the customer",
 )
 async def waitlist_ticket_config(interaction: discord.Interaction, category: discord.CategoryChannel, prefix: str, ignore_users: str | None = None):
     guild = guild_only(interaction)
@@ -2884,7 +2809,7 @@ async def waitlist_move(interaction: discord.Interaction):
 
     entries = data[key]["users"]
     if len(entries) < 2:
-        await interaction.response.send_message("Only one entry — nothing to reorder.", ephemeral=True)
+        await interaction.response.send_message("Only one entry - nothing to reorder.", ephemeral=True)
         return
 
     view = WaitlistMovePickView(entries, interaction.guild)
@@ -2892,7 +2817,7 @@ async def waitlist_move(interaction: discord.Interaction):
 
 
 # ------------------------------------------------------------
-# Commands — Vouch (auto-remove from waitlist)
+# Commands - Vouch (auto-remove from waitlist)
 # ------------------------------------------------------------
 
 @bot.tree.command(name="vouch_setup", description="When someone posts in the vouch channel, remove their waitlist role + waitlist chart entry")
@@ -2916,7 +2841,7 @@ async def vouch_clear(interaction: discord.Interaction):
 
 
 # ------------------------------------------------------------
-# Commands — Fast Pass Timers
+# Commands - Fast Pass Timers
 # ------------------------------------------------------------
 
 FASTPASS_PAW_EMOJI = "<a:1white_paws:1517064987678343198>"
@@ -2977,13 +2902,11 @@ async def start_fastpass_timer(interaction: discord.Interaction, hours: int):
         "INSERT INTO fastpass_timers (guild_id, channel_id, total_hours, end_time, warned, done) VALUES (?, ?, ?, ?, 0, 0)",
         (guild.id, interaction.channel_id, hours, end_time.isoformat()),
     )
-    timer_id = cur.lastrowid
     conn.commit()
     conn.close()
 
-    message = f"{CHECK} {hours} hrs FP timer started — will remind 2 hours before, and once again when the {hours} hours are up {FASTPASS_PAW_EMOJI}"
+    message = f"{CHECK} {hours} hrs FP timer started - will remind 2 hours before, and once again when the {hours} hours are up {FASTPASS_PAW_EMOJI}"
     await interaction.response.send_message(message)
-    print(f"[DEBUG] Started fastpass timer #{timer_id} in guild {guild.id}, channel {interaction.channel_id}, {hours}h, ends {end_time.isoformat()}")
 
 
 @bot.tree.command(name="72", description="Start a 72-hour fast pass timer (pings at 2 hours left, and when it's done)")
@@ -2999,17 +2922,13 @@ async def fastpass_24(interaction: discord.Interaction):
 @tasks.loop(seconds=FASTPASS_CHECK_INTERVAL_SECONDS)
 async def check_fastpass_timers():
     now = datetime.now(timezone.utc)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM fastpass_timers WHERE done = 0")
-    rows = cur.fetchall()
-    conn.close()
+    rows = db_all("SELECT * FROM fastpass_timers WHERE done = 0")
 
     for row in rows:
         try:
             end_time = datetime.fromisoformat(row["end_time"])
         except Exception as e:
-            print(f"[DEBUG] Bad end_time on fastpass timer #{row['id']}: {e}")
+            print(f"Bad end_time on fastpass timer #{row['id']}: {e}")
             continue
 
         guild = bot.get_guild(row["guild_id"])
@@ -3021,16 +2940,12 @@ async def check_fastpass_timers():
 
         if not row["warned"] and now >= end_time - timedelta(hours=2):
             target = _fastpass_ping_target(guild)
-            message = f"FP timer — {CHECK} 2 hours left! {target} {FASTPASS_WARNING_EMOJI}"
+            message = f"FP timer - {CHECK} 2 hours left! {target} {FASTPASS_WARNING_EMOJI}"
             try:
                 await channel.send(message)
             except Exception as e:
-                print(f"[DEBUG] Failed to send fastpass 2hr warning for timer #{row['id']}: {e}")
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute("UPDATE fastpass_timers SET warned = 1 WHERE id = ?", (row["id"],))
-            conn.commit()
-            conn.close()
+                print(f"Failed to send fastpass 2hr warning for timer #{row['id']}: {e}")
+            db_run("UPDATE fastpass_timers SET warned = 1 WHERE id = ?", (row["id"],))
 
         if now >= end_time:
             target = _fastpass_ping_target(guild)
@@ -3038,12 +2953,8 @@ async def check_fastpass_timers():
             try:
                 await channel.send(message)
             except Exception as e:
-                print(f"[DEBUG] Failed to send fastpass expiry message for timer #{row['id']}: {e}")
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute("UPDATE fastpass_timers SET done = 1, warned = 1 WHERE id = ?", (row["id"],))
-            conn.commit()
-            conn.close()
+                print(f"Failed to send fastpass expiry message for timer #{row['id']}: {e}")
+            db_run("UPDATE fastpass_timers SET done = 1, warned = 1 WHERE id = ?", (row["id"],))
 
 
 @check_fastpass_timers.before_loop
@@ -3052,7 +2963,7 @@ async def before_check_fastpass_timers():
 
 
 # ------------------------------------------------------------
-# Commands — Role Management
+# Commands - Role Management
 # ------------------------------------------------------------
 
 role_group = app_commands.Group(name="role", description="Role management")
@@ -3093,7 +3004,7 @@ bot.tree.add_command(role_group)
 
 
 # ------------------------------------------------------------
-# Commands — Switch (move a ticket through unpaid → paid → upload → completed)
+# Commands - Switch (move a ticket through unpaid → paid → upload → completed)
 # ------------------------------------------------------------
 
 SWITCH_STAGES = [
@@ -3116,7 +3027,7 @@ async def switch_setup(interaction: discord.Interaction, unpaid: discord.Categor
     guild = guild_only(interaction)
     given = [c for c in (unpaid, paid, upload, completed) if c is not None]
     if len({c.id for c in given}) != len(given):
-        await interaction.response.send_message("Each stage needs its own category — I got the same one twice.", ephemeral=True)
+        await interaction.response.send_message("Each stage needs its own category - I got the same one twice.", ephemeral=True)
         return
 
     updates = dict(switch_unpaid_category_id=str(unpaid.id), switch_paid_category_id=str(paid.id))
@@ -3193,14 +3104,14 @@ async def switch_command(interaction: discord.Interaction, stage: str | None = N
 
 
 # ------------------------------------------------------------
-# Commands — Channel Access
+# Commands - Channel Access
 # ------------------------------------------------------------
 
 @bot.tree.command(name="adduser", description="Add a user to the channel you're in (gives them view + send access)")
 @app_commands.checks.has_permissions(manage_channels=True)
 @app_commands.describe(user="User to add to this channel")
 async def adduser(interaction: discord.Interaction, user: discord.Member):
-    guild = guild_only(interaction)
+    guild_only(interaction)
     channel = interaction.channel
 
     try:
@@ -3216,7 +3127,7 @@ async def adduser(interaction: discord.Interaction, user: discord.Member):
 @app_commands.checks.has_permissions(manage_channels=True)
 @app_commands.describe(user="User to remove from this channel")
 async def removeuser(interaction: discord.Interaction, user: discord.Member):
-    guild = guild_only(interaction)
+    guild_only(interaction)
     channel = interaction.channel
 
     try:
@@ -3229,7 +3140,7 @@ async def removeuser(interaction: discord.Interaction, user: discord.Member):
 
 
 # ------------------------------------------------------------
-# Commands — Moderation (ban)
+# Commands - Moderation (ban)
 # ------------------------------------------------------------
 
 TEMPBAN_CHECK_INTERVAL_SECONDS = 60
@@ -3264,9 +3175,9 @@ async def resolve_user_token(token: str) -> discord.User | None:
 
 BAN_USAGE = (
     "**Usage:** `.ban <@user or ID> [duration] [reason] [-d <delete window>]`\n"
-    "`.ban @user` — permanent\n"
-    "`.ban @user 7d spamming` — 7 day ban\n"
-    "`.ban @user perm scam -d 24h` — permanent, and delete their last 24 hours of messages\n"
+    "`.ban @user` - permanent\n"
+    "`.ban @user 7d spamming` - 7 day ban\n"
+    "`.ban @user perm scam -d 24h` - permanent, and delete their last 24 hours of messages\n"
     "*Duration: `30m`, `12h`, `7d`, `2w`, `1w2d`. Delete window: up to `7d`.*"
 )
 
@@ -3333,7 +3244,7 @@ async def ban_prefix(ctx: commands.Context, *, args: str = ""):
             await ctx.send("You can't ban someone whose highest role is equal to or above yours.")
             return
         if target_member.top_role >= guild.me.top_role:
-            await ctx.send("I can't ban them — their highest role is equal to or above mine. Move my role higher in Server Settings → Roles.")
+            await ctx.send("I can't ban them - their highest role is equal to or above mine. Move my role higher in Server Settings → Roles.")
             return
 
     unban_at = datetime.now(timezone.utc) + delta if delta else None
@@ -3398,7 +3309,7 @@ async def unban_prefix(ctx: commands.Context, *, args: str = ""):
         if raw.isdigit():
             ban_entry = await guild.fetch_ban(discord.Object(id=int(raw)))
         else:
-            # Not an ID — look the name up in the ban list.
+            # Not an ID - look the name up in the ban list.
             wanted = query.lower()
             async for entry in guild.bans(limit=None):
                 if entry.user.name.lower() == wanted or str(entry.user).lower() == wanted:
@@ -3424,11 +3335,7 @@ async def unban_prefix(ctx: commands.Context, *, args: str = ""):
         await ctx.send(f"Couldn't unban them: {str(e)[:150]}")
         return
 
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("UPDATE temp_bans SET done = 1 WHERE guild_id = ? AND user_id = ? AND done = 0", (guild.id, ban_entry.user.id))
-    conn.commit()
-    conn.close()
+    db_run("UPDATE temp_bans SET done = 1 WHERE guild_id = ? AND user_id = ? AND done = 0", (guild.id, ban_entry.user.id))
 
     msg = f"{CHECK} Unbanned **{ban_entry.user}**."
     if reason:
@@ -3439,17 +3346,13 @@ async def unban_prefix(ctx: commands.Context, *, args: str = ""):
 @tasks.loop(seconds=TEMPBAN_CHECK_INTERVAL_SECONDS)
 async def check_temp_bans():
     now = datetime.now(timezone.utc)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM temp_bans WHERE done = 0")
-    rows = cur.fetchall()
-    conn.close()
+    rows = db_all("SELECT * FROM temp_bans WHERE done = 0")
 
     for row in rows:
         try:
             unban_time = datetime.fromisoformat(row["unban_time"])
         except Exception as e:
-            print(f"[DEBUG] Bad unban_time on temp ban #{row['id']}: {e}")
+            print(f"Bad unban_time on temp ban #{row['id']}: {e}")
             continue
         if now < unban_time:
             continue
@@ -3462,21 +3365,16 @@ async def check_temp_bans():
         try:
             await guild.unban(discord.Object(id=row["user_id"]), reason="Temporary ban expired")
             finished = True
-            print(f"[DEBUG] Lifted temp ban #{row['id']} for user {row['user_id']} in guild {guild.id}")
         except discord.NotFound:
-            # Already unbanned by hand — nothing left to do.
+            # Already unbanned by hand - nothing left to do.
             finished = True
         except discord.Forbidden:
-            print(f"[DEBUG] Missing permission to unban {row['user_id']} in guild {guild.id}; will retry")
+            print(f"Missing permission to unban {row['user_id']} in guild {guild.id}; will retry")
         except Exception as e:
-            print(f"[DEBUG] Failed to lift temp ban #{row['id']}: {e!r}")
+            print(f"Failed to lift temp ban #{row['id']}: {e!r}")
 
         if finished:
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute("UPDATE temp_bans SET done = 1 WHERE id = ?", (row["id"],))
-            conn.commit()
-            conn.close()
+            db_run("UPDATE temp_bans SET done = 1 WHERE id = ?", (row["id"],))
 
 
 @check_temp_bans.before_loop
@@ -3485,7 +3383,7 @@ async def before_check_temp_bans():
 
 
 # ------------------------------------------------------------
-# Commands — Quick-leave ban
+# Commands - Quick-leave ban
 # ------------------------------------------------------------
 
 @bot.tree.command(name="quickleaveban_setup", description="Auto-ban anyone who leaves too soon after joining")
@@ -3531,7 +3429,7 @@ async def quickleaveban_clear(interaction: discord.Interaction):
 
 
 # ------------------------------------------------------------
-# Commands — Showcase
+# Commands - Showcase
 # ------------------------------------------------------------
 
 @bot.tree.command(name="showcase_setup", description="Set the fixed showcase template (text + the 2nd/3rd banner images)")
@@ -3601,7 +3499,7 @@ async def showcase_command(interaction: discord.Interaction, image: discord.Atta
 
 
 # ------------------------------------------------------------
-# Commands — Price
+# Commands - Price
 # ------------------------------------------------------------
 
 ROBUX_EMOJI = "<:ggcwutieDNSRobux:1554353658462732320>"
@@ -3694,7 +3592,7 @@ async def price_command(
 
 
 # ------------------------------------------------------------
-# Commands — Roblox
+# Commands - Roblox
 # ------------------------------------------------------------
 
 roblox_group = app_commands.Group(name="roblox", description="Roblox utilities")
@@ -3723,7 +3621,7 @@ bot.tree.add_command(roblox_group)
 
 
 # ------------------------------------------------------------
-# Commands — Emoji/Sticker Stealing
+# Commands - Emoji/Sticker Stealing
 # ------------------------------------------------------------
 
 emoji_group = app_commands.Group(name="emoji", description="Emoji management")
@@ -3764,7 +3662,7 @@ bot.tree.add_command(emoji_group)
 
 
 # ------------------------------------------------------------
-# Commands — Sticker Stealing
+# Commands - Sticker Stealing
 # ------------------------------------------------------------
 
 sticker_group = app_commands.Group(name="sticker", description="Sticker management")
