@@ -1570,10 +1570,10 @@ async def on_member_remove(member: discord.Member):
         title="Member Banned",
         description=(
             f"**Moderator:** {bot.user.mention}\n"
-            f"**User:** {member.mention} (`{member.id}`)\n"
+            f"**User:** {member.mention}\n"
             f"**Reason:** {reason}"
         ),
-        color=0xED4245,
+        color=get_theme_color("pink"),
         timestamp=datetime.now(timezone.utc),
     )
     embed.set_thumbnail(url=member.display_avatar.url)
