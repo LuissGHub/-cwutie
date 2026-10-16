@@ -83,6 +83,7 @@ SETTINGS_COLUMNS = [
     "fastpass_role_ids",
     "switch_unpaid_category_id", "switch_paid_category_id",
     "switch_upload_category_id", "switch_completed_category_id",
+    "quickleave_enabled", "quickleave_minutes", "quickleave_log_channel_id",
 ]
 
 # Columns for the image_responders table that were added after the table's
@@ -1249,6 +1250,43 @@ class WaitlistMovePositionView(discord.ui.View):
 
 
 # ------------------------------------------------------------
+# Quick-Leave Auto-Ban Helpers
+# ------------------------------------------------------------
+
+DEFAULT_QUICKLEAVE_MINUTES = 60
+
+
+def format_elapsed(seconds: float) -> str:
+    """Human-friendly 'time since joining' for the ban reason/log,
+    e.g. 4s, 12m 5s, 1h 3m."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        m, s = divmod(seconds, 60)
+        return f"{m}m {s}s" if s else f"{m}m"
+    h, rem = divmod(seconds, 3600)
+    m = rem // 60
+    return f"{h}h {m}m" if m else f"{h}h"
+
+
+def format_threshold(minutes: int) -> str:
+    """'under 10 minutes' / 'under 1 hour' / 'under 90 minutes' style text."""
+    if minutes % 60 == 0:
+        hours = minutes // 60
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+    return f"{minutes} minute{'s' if minutes != 1 else ''}"
+
+
+def get_quickleave_minutes(settings) -> int:
+    try:
+        value = int(settings["quickleave_minutes"]) if settings and settings["quickleave_minutes"] else DEFAULT_QUICKLEAVE_MINUTES
+    except (TypeError, ValueError):
+        value = DEFAULT_QUICKLEAVE_MINUTES
+    return max(1, value)
+
+
+# ------------------------------------------------------------
 # Events
 # ------------------------------------------------------------
 
@@ -1439,6 +1477,111 @@ async def on_member_join(member: discord.Member):
     if settings["welcome_banner2_url"]:
         embed2 = build_embed(title=None, description=None, theme=settings["welcome_theme"] or "pink", image=settings["welcome_banner2_url"])
         await channel.send(embed=embed2)
+
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    """Quick-leave auto-ban: if someone leaves the server sooner than the
+    configured window after joining (default 1 hour), ban them and post a
+    'Member Banned' entry in the configured log channel.
+
+    Skipped when:
+      - the feature isn't enabled (/quickleaveban_setup),
+      - the member is a bot,
+      - the member was already kicked or banned by someone (so mods who
+        kick/ban a new joiner don't get a duplicate action/log from us),
+      - we can't tell when they joined."""
+    if member.bot:
+        return
+
+    guild = member.guild
+    settings = get_settings(guild.id)
+    if not settings or settings["quickleave_enabled"] != "1":
+        return
+
+    joined_at = member.joined_at
+    if joined_at is None:
+        print(f"[DEBUG] Quick-leave: no joined_at for {member.id}; skipping")
+        return
+
+    window_minutes = get_quickleave_minutes(settings)
+    elapsed = (datetime.now(timezone.utc) - joined_at).total_seconds()
+    if elapsed >= window_minutes * 60:
+        return
+
+    # Give Discord a moment so a mod's own kick/ban shows up in the ban list /
+    # audit log before we decide whether this was a voluntary leave.
+    await asyncio.sleep(2)
+
+    try:
+        await guild.fetch_ban(discord.Object(id=member.id))
+        return  # already banned (by a mod or another bot)
+    except discord.NotFound:
+        pass
+    except discord.Forbidden:
+        print(f"[DEBUG] Quick-leave: missing Ban Members permission to check bans in guild {guild.id}")
+        return
+    except Exception as e:
+        print(f"[DEBUG] Quick-leave: failed to check existing ban for {member.id}: {e!r}")
+
+    # Was this a kick? (Needs View Audit Log — if we don't have it, we just
+    # skip this check and treat it as a normal leave.)
+    try:
+        async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.kick):
+            if entry.target and entry.target.id == member.id and (datetime.now(timezone.utc) - entry.created_at).total_seconds() < 15:
+                return
+    except discord.Forbidden:
+        pass
+    except Exception as e:
+        print(f"[DEBUG] Quick-leave: failed to read audit log for {member.id}: {e!r}")
+
+    elapsed_text = format_elapsed(elapsed)
+    threshold_text = format_threshold(window_minutes)
+    reason = f"Auto ban: left after {elapsed_text} (under {threshold_text})"
+
+    try:
+        await guild.ban(member, reason=reason[:512], delete_message_seconds=0)
+        print(f"[DEBUG] Quick-leave: banned {member} ({member.id}) in guild {guild.id} — {reason}")
+    except discord.Forbidden:
+        print(f"[DEBUG] Quick-leave: I don't have permission to ban {member.id} in guild {guild.id}")
+        return
+    except discord.HTTPException as e:
+        print(f"[DEBUG] Quick-leave: failed to ban {member.id}: {e!r}")
+        return
+
+    # A permanent ban shouldn't be undone by an old temp-ban timer.
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("UPDATE temp_bans SET done = 1 WHERE guild_id = ? AND user_id = ? AND done = 0", (guild.id, member.id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[DEBUG] Quick-leave: failed to retire temp ban timers for {member.id}: {e!r}")
+
+    log_channel_id = settings["quickleave_log_channel_id"]
+    if not log_channel_id:
+        return
+    log_channel = guild.get_channel(int(log_channel_id))
+    if not log_channel:
+        return
+
+    embed = discord.Embed(
+        title="Member Banned",
+        description=(
+            f"**Moderator:** {bot.user.mention}\n"
+            f"**User:** {member.mention} (`{member.id}`)\n"
+            f"**Reason:** {reason}"
+        ),
+        color=0xED4245,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.set_footer(text=f"{bot.user} - Moderation Log", icon_url=bot.user.display_avatar.url)
+    try:
+        await log_channel.send(embed=embed)
+    except Exception as e:
+        print(f"[DEBUG] Quick-leave: failed to send log embed: {e!r}")
 
 
 @bot.event
@@ -3624,6 +3767,60 @@ async def before_check_temp_bans():
 
 
 # ------------------------------------------------------------
+# Commands — Quick-Leave Auto-Ban
+# ------------------------------------------------------------
+
+@bot.tree.command(name="quickleaveban_setup", description="Auto-ban anyone who leaves the server too soon after joining")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(
+    minutes="Ban anyone who leaves within this many minutes of joining (default 60 = 1 hour)",
+    log_channel="Channel to post a 'Member Banned' log entry in (optional)",
+)
+async def quickleaveban_setup(interaction: discord.Interaction, minutes: app_commands.Range[int, 1, 10080] = DEFAULT_QUICKLEAVE_MINUTES, log_channel: discord.TextChannel | None = None):
+    guild = guild_only(interaction)
+    updates = dict(quickleave_enabled="1", quickleave_minutes=str(minutes))
+    if log_channel is not None:
+        updates["quickleave_log_channel_id"] = str(log_channel.id)
+    upsert_settings(guild.id, **updates)
+
+    settings = get_settings(guild.id)
+    log_id = settings["quickleave_log_channel_id"] if settings else None
+    log_text = f"<#{log_id}>" if log_id else "*(none — bans happen silently; set one with the `log_channel` option)*"
+    await interaction.response.send_message(
+        f"{CHECK} Quick-leave auto-ban is **on**.\n"
+        f"Anyone who leaves within **{format_threshold(minutes)}** of joining gets banned.\n"
+        f"**Log channel:** {log_text}\n"
+        f"*(Needs the Ban Members permission. Members who were kicked or banned by a mod are skipped.)*",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="quickleaveban_status", description="See the quick-leave auto-ban settings")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def quickleaveban_status(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    settings = get_settings(guild.id)
+    enabled = bool(settings and settings["quickleave_enabled"] == "1")
+    minutes = get_quickleave_minutes(settings)
+    log_id = settings["quickleave_log_channel_id"] if settings else None
+    log_text = f"<#{log_id}>" if log_id else "*(none)*"
+    await interaction.response.send_message(
+        f"**Quick-leave auto-ban:** {'On' if enabled else 'Off'}\n"
+        f"**Window:** {format_threshold(minutes)}\n"
+        f"**Log channel:** {log_text}",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="quickleaveban_clear", description="Turn off the quick-leave auto-ban")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def quickleaveban_clear(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, quickleave_enabled="0")
+    await interaction.response.send_message(f"{CHECK} Quick-leave auto-ban is now off.", ephemeral=True)
+
+
+# ------------------------------------------------------------
 # Commands — Showcase
 # ------------------------------------------------------------
 
@@ -3718,6 +3915,10 @@ UPLOAD_OPTIONS = {
 
 CUSTOM_CHARM_PRICE = (2, 250)   # (usd, robux), flat
 TEXT_DESIGN_PRICE = (3, 350)    # (usd, robux), flat
+# Body change = same necklace design but on a different model.
+BODY_CHANGE_PRICE = (1, 100)    # (usd, robux), per body change
+# Copy = just an extra copy of the same thing.
+EXTRA_COPY_PRICE = (1, 100)     # (usd, robux), per extra copy
 
 
 @bot.tree.command(name="price", description="Show the price in $ and Robux for an item, upload option, and add-ons")
@@ -3726,6 +3927,8 @@ TEXT_DESIGN_PRICE = (3, 350)    # (usd, robux), flat
     custom_charms="Add custom charms? (optional)",
     text_designs="Add text designs? (optional)",
     upload="Upload option (optional)",
+    body_change="How many body changes? Same design on a different model, $1 / 100 robux each (optional)",
+    extra_copy="How many extra copies? $1 / 100 robux each (optional)",
     discount="Apply 10% discount?",
 )
 @app_commands.choices(
@@ -3741,6 +3944,8 @@ async def price_command(
     custom_charms: str = "no",
     text_designs: str = "no",
     upload: str | None = None,
+    body_change: app_commands.Range[int, 0, 50] = 0,
+    extra_copy: app_commands.Range[int, 0, 50] = 0,
     discount: str = "no",
 ):
     rows = []
@@ -3752,6 +3957,12 @@ async def price_command(
         rows.append(("text designs", TEXT_DESIGN_PRICE[0], TEXT_DESIGN_PRICE[1]))
     if upload:
         rows.append(UPLOAD_OPTIONS[upload])
+    if body_change > 0:
+        label = "body change" if body_change == 1 else f"body change x{body_change}"
+        rows.append((label, BODY_CHANGE_PRICE[0] * body_change, BODY_CHANGE_PRICE[1] * body_change))
+    if extra_copy > 0:
+        label = "extra copy" if extra_copy == 1 else f"extra copy x{extra_copy}"
+        rows.append((label, EXTRA_COPY_PRICE[0] * extra_copy, EXTRA_COPY_PRICE[1] * extra_copy))
 
     if not rows:
         await interaction.response.send_message("❌ Pick at least an item, an upload option, or an add-on.", ephemeral=True)
