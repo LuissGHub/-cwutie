@@ -62,7 +62,6 @@ SETTINGS_COLUMNS = [
     "boost_channel_id", "boost_text", "boost_outside_text", "boost_title", "boost_color", "boost_image_url", "boost_banner2_url", "boost_thumbnail_url", "boost_use_avatar",
     "boost_reaction_emoji", "boost_super_reaction",
     "autoreact_channel_id", "autoreact_reaction_emoji", "autoreact_super_reaction",
-    "usermention_user_id", "usermention_emojis",
     "vouch_channel_id", "waitlist_role_id",
     "ticket_category_id", "ticket_name_prefix", "ticket_ignore_user_ids",
     "showcase_channel_id", "showcase_text", "showcase_theme", "showcase_image2_url", "showcase_image3_url",
@@ -167,18 +166,6 @@ def init_db() -> None:
                 autoreact_reaction_emoji = vouch_reaction_emoji,
                 autoreact_super_reaction = vouch_super_reaction
             WHERE vouch_channel_id IS NOT NULL AND autoreact_channel_id IS NULL
-            """
-        )
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cur.execute(
-            """
-            UPDATE settings
-            SET usermention_user_id = rolemention_role_id,
-                usermention_emojis = rolemention_emojis
-            WHERE rolemention_role_id IS NOT NULL AND usermention_user_id IS NULL
             """
         )
     except sqlite3.OperationalError:
@@ -1487,25 +1474,6 @@ async def on_message(message: discord.Message):
                         except Exception as e:
                             print(f"Failed to auto-react with {emoji}: {e}")
 
-    if (
-        settings
-        and settings["usermention_user_id"]
-        and message.mentions
-        and message.channel.id not in autoreact_channel_ids
-    ):
-        watched_user_ids = {int(u) for u in settings["usermention_user_id"].split(",") if u.strip()}
-        mentioned_user_ids = {u.id for u in message.mentions}
-        if watched_user_ids & mentioned_user_ids:
-            reaction_emojis = settings["usermention_emojis"]
-            if reaction_emojis:
-                emoji_list = [e.strip() for e in reaction_emojis.split(",") if e.strip()]
-                await asyncio.sleep(AUTOREACT_DELAY_SECONDS)
-                for emoji in emoji_list:
-                    try:
-                        await message.add_reaction(emoji)
-                    except Exception as e:
-                        print(f"Failed to auto-react to user mention with {emoji}: {e}")
-
     if settings and settings["vouch_channel_id"] and message.channel.id == int(settings["vouch_channel_id"]):
         waitlist_role = message.guild.get_role(int(settings["waitlist_role_id"])) if settings["waitlist_role_id"] else None
         if waitlist_role and waitlist_role in message.author.roles:
@@ -2149,54 +2117,6 @@ async def autoreact_clear(interaction: discord.Interaction):
     guild = guild_only(interaction)
     upsert_settings(guild.id, autoreact_channel_id="", autoreact_reaction_emoji="", autoreact_super_reaction="0")
     await interaction.response.send_message(f"{CHECK} Autoreact disabled.", ephemeral=True)
-
-
-# ------------------------------------------------------------
-# Commands - User Mention Reactions
-# ------------------------------------------------------------
-
-@bot.tree.command(name="usermention_setup", description="React with emojis whenever someone @'s a specific user")
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(users="User(s) to watch for, space-separated (e.g. @user1 @user2)", emojis="Emojis to react with (space-separated)")
-async def usermention_setup(interaction: discord.Interaction, users: str, emojis: str):
-    guild = guild_only(interaction)
-    found, invalid = parse_user_list(guild, users)
-    if not found:
-        await interaction.response.send_message("I couldn't find any valid users in that list. Mention them like @user1 @user2.", ephemeral=True)
-        return
-
-    emoji_list = emojis.split()
-    user_ids = [str(u.id) for u in found]
-    upsert_settings(guild.id, usermention_user_id=",".join(user_ids), usermention_emojis=",".join(emoji_list))
-
-    user_display = " ".join(u.mention for u in found)
-    emoji_display = " ".join(emoji_list)
-    msg = f"{CHECK} Now reacting with {emoji_display} whenever someone mentions {user_display}\n*(Note: this is skipped for messages posted in an autoreact/vouch channel, since that channel already reacts to every message.)*"
-    if invalid:
-        msg += f"\nSkipped (not found): {', '.join(invalid)}"
-    await interaction.response.send_message(msg, ephemeral=True)
-
-
-@bot.tree.command(name="usermention_list", description="See which users trigger an auto-react")
-async def usermention_list(interaction: discord.Interaction):
-    guild = guild_only(interaction)
-    settings = get_settings(guild.id)
-    if not settings or not settings["usermention_user_id"]:
-        await interaction.response.send_message("No user-mention reactions set up. Use `/usermention_setup`.", ephemeral=True)
-        return
-
-    ids = [u for u in settings["usermention_user_id"].split(",") if u.strip()]
-    display = " ".join(f"<@{uid}>" for uid in ids)
-    emoji_display = " ".join(settings["usermention_emojis"].split(",")) if settings["usermention_emojis"] else "*(none set)*"
-    await interaction.response.send_message(f"**Watched users:** {display}\n**Emojis:** {emoji_display}\n*(Skipped inside autoreact/vouch channels.)*", ephemeral=True)
-
-
-@bot.tree.command(name="usermention_clear", description="Turn off user-mention auto-react")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def usermention_clear(interaction: discord.Interaction):
-    guild = guild_only(interaction)
-    upsert_settings(guild.id, usermention_user_id="", usermention_emojis="")
-    await interaction.response.send_message(f"{CHECK} User-mention auto-react disabled.", ephemeral=True)
 
 
 # ------------------------------------------------------------
@@ -3343,6 +3263,127 @@ async def unban_prefix(ctx: commands.Context, *, args: str = ""):
     await ctx.send(msg)
 
 
+MAX_MUTE = timedelta(days=28)
+
+MUTE_USAGE = (
+    "**Usage:** `.mute <@user or ID> [duration] [reason]`\n"
+    "`.mute @user` - 28 days (the max)\n"
+    "`.mute @user 2h spamming` - 2 hour mute\n"
+    "*Duration: `30m`, `12h`, `7d`, `2w`. Max 28 days.*"
+)
+
+UNMUTE_USAGE = "**Usage:** `.unmute <@user or ID> [reason]`"
+
+
+async def resolve_member_token(guild: discord.Guild, token: str) -> discord.Member | None:
+    m = USER_MENTION_RE.match(token)
+    raw = m.group(1) if m else token
+    if not raw.isdigit():
+        return None
+    member = guild.get_member(int(raw))
+    if member:
+        return member
+    try:
+        return await guild.fetch_member(int(raw))
+    except discord.NotFound:
+        return None
+
+
+@bot.command(name="mute")
+@commands.guild_only()
+@commands.has_permissions(moderate_members=True)
+async def mute_prefix(ctx: commands.Context, *, args: str = ""):
+    guild = ctx.guild
+    moderator = ctx.author
+    tokens = args.split()
+    if not tokens:
+        await ctx.send(MUTE_USAGE)
+        return
+
+    member = await resolve_member_token(guild, tokens[0])
+    if member is None:
+        await ctx.send("I couldn't find that member. Mention them or paste their user ID.\n" + MUTE_USAGE)
+        return
+
+    rest = tokens[1:]
+    delta = None
+    if rest:
+        try:
+            delta = parse_duration(rest[0])
+            rest = rest[1:]
+        except ValueError:
+            pass
+    reason = " ".join(rest) or None
+    delta = delta or MAX_MUTE
+
+    if delta > MAX_MUTE:
+        await ctx.send("Discord only allows mutes up to 28 days.")
+        return
+    if member.id == moderator.id:
+        await ctx.send("You can't mute yourself.")
+        return
+    if bot.user and member.id == bot.user.id:
+        await ctx.send("I can't mute myself.")
+        return
+    if member.id == guild.owner_id:
+        await ctx.send("You can't mute the server owner.")
+        return
+    if moderator.id != guild.owner_id and member.top_role >= moderator.top_role:
+        await ctx.send("You can't mute someone whose highest role is equal to or above yours.")
+        return
+    if member.top_role >= guild.me.top_role:
+        await ctx.send("I can't mute them - their highest role is equal to or above mine. Move my role higher in Server Settings → Roles.")
+        return
+
+    audit_reason = f"{reason or 'No reason given'} (muted by {moderator} [{moderator.id}])"[:512]
+    try:
+        await member.timeout(delta, reason=audit_reason)
+    except discord.Forbidden:
+        await ctx.send("I don't have permission to mute that user (I need the Moderate Members permission, and I can't mute admins).")
+        return
+    except discord.HTTPException as e:
+        await ctx.send(f"Couldn't mute them: {str(e)[:150]}")
+        return
+
+    unmute_at = datetime.now(timezone.utc) + delta
+    msg = f"{CHECK} Muted **{member}**.\n**Duration:** unmutes <t:{int(unmute_at.timestamp())}:R>"
+    if reason:
+        msg += f"\n**Reason:** {reason}"
+    await ctx.send(msg)
+
+
+@bot.command(name="unmute")
+@commands.guild_only()
+@commands.has_permissions(moderate_members=True)
+async def unmute_prefix(ctx: commands.Context, *, args: str = ""):
+    guild = ctx.guild
+    tokens = args.split()
+    if not tokens:
+        await ctx.send(UNMUTE_USAGE)
+        return
+
+    member = await resolve_member_token(guild, tokens[0])
+    if member is None:
+        await ctx.send("I couldn't find that member. Mention them or paste their user ID.\n" + UNMUTE_USAGE)
+        return
+
+    reason = " ".join(tokens[1:]) or None
+    audit_reason = f"{reason or 'No reason given'} (unmuted by {ctx.author} [{ctx.author.id}])"[:512]
+    try:
+        await member.timeout(None, reason=audit_reason)
+    except discord.Forbidden:
+        await ctx.send("I don't have permission to unmute that user.")
+        return
+    except discord.HTTPException as e:
+        await ctx.send(f"Couldn't unmute them: {str(e)[:150]}")
+        return
+
+    msg = f"{CHECK} Unmuted **{member}**."
+    if reason:
+        msg += f"\n**Reason:** {reason}"
+    await ctx.send(msg)
+
+
 @tasks.loop(seconds=TEMPBAN_CHECK_INTERVAL_SECONDS)
 async def check_temp_bans():
     now = datetime.now(timezone.utc)
@@ -3534,17 +3575,21 @@ EXTRA_COPY_PRICE = (1, 100)   # per copy
 @bot.tree.command(name="price", description="Show the price in $ and Robux for an item, upload option, and add-ons")
 @app_commands.describe(
     item="Necklace / main item (optional)",
+    item2="A second, different item (optional)",
+    item3="A third, different item (optional)",
     custom_charms="Add custom charms? (optional)",
     text_designs="Add text designs? (optional)",
     upload="Upload option (optional)",
     fastpass="Fastpass (optional)",
-    quantity="How many of the item? (two name necklaces are regular price + a body change each extra)",
+    quantity="How many of the first item? (two name necklaces are regular price + a body change each extra)",
     body_change="Body change (same design, different model)?",
     extra_copy="How many extra copies?",
     discount="Apply 10% discount?",
 )
 @app_commands.choices(
     item=[app_commands.Choice(name=v[0], value=k) for k, v in PRICE_ITEMS.items()],
+    item2=[app_commands.Choice(name=v[0], value=k) for k, v in PRICE_ITEMS.items()],
+    item3=[app_commands.Choice(name=v[0], value=k) for k, v in PRICE_ITEMS.items()],
     custom_charms=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
     text_designs=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
     body_change=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
@@ -3555,6 +3600,8 @@ EXTRA_COPY_PRICE = (1, 100)   # per copy
 async def price_command(
     interaction: discord.Interaction,
     item: str | None = None,
+    item2: str | None = None,
+    item3: str | None = None,
     custom_charms: str = "no",
     text_designs: str = "no",
     upload: str | None = None,
@@ -3565,18 +3612,25 @@ async def price_command(
     discount: str = "no",
 ):
     # a two name necklace stays regular price, each extra one is just a body change
-    mult = quantity
+    first_mult = 1 if item == "two_name_necklace" else quantity
     body_changes = 1 if body_change == "yes" else 0
     if item == "two_name_necklace":
-        mult = 1
         body_changes += quantity - 1
 
-    tag = f" x{quantity}" if quantity > 1 else ""
+    # charms / text designs / upload scale with the total number of items ordered
+    extra_items = [i for i in (item2, item3) if i]
+    total_items = (first_mult if item else 0) + len(extra_items)
+    mult = max(total_items, 1)
+    tag = f" x{mult}" if mult > 1 else ""
 
     rows = []
     if item:
         label, usd, robux = PRICE_ITEMS[item]
-        rows.append((label + tag, usd * mult, robux * mult))
+        if first_mult > 1:
+            label += f" x{first_mult}"
+        rows.append((label, usd * first_mult, robux * first_mult))
+    for other in extra_items:
+        rows.append(PRICE_ITEMS[other])
     if custom_charms == "yes":
         rows.append(("custom charms" + tag, CUSTOM_CHARM_PRICE[0] * mult, CUSTOM_CHARM_PRICE[1] * mult))
     if text_designs == "yes":
