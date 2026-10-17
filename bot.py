@@ -3520,6 +3520,11 @@ UPLOAD_OPTIONS = {
     "limited_upload": ("limited upload", 3, 350),
 }
 
+FASTPASS_OPTIONS = {
+    "normal_fastpass": ("normal fastpass", 7, 750),
+    "same_day_fastpass": ("same day fastpass", 10, 1100),
+}
+
 CUSTOM_CHARM_PRICE = (2, 250)   # (usd, robux), flat
 TEXT_DESIGN_PRICE = (3, 350)    # (usd, robux), flat
 BODY_CHANGE_PRICE = (1, 100)
@@ -3532,6 +3537,7 @@ EXTRA_COPY_PRICE = (1, 100)   # per copy
     custom_charms="Add custom charms? (optional)",
     text_designs="Add text designs? (optional)",
     upload="Upload option (optional)",
+    fastpass="Fastpass (optional)",
     body_change="Body change (same design, different model)?",
     extra_copy="How many extra copies?",
     discount="Apply 10% discount?",
@@ -3542,6 +3548,7 @@ EXTRA_COPY_PRICE = (1, 100)   # per copy
     text_designs=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
     body_change=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
     upload=[app_commands.Choice(name=v[0], value=k) for k, v in UPLOAD_OPTIONS.items()],
+    fastpass=[app_commands.Choice(name=v[0], value=k) for k, v in FASTPASS_OPTIONS.items()],
     discount=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
 )
 async def price_command(
@@ -3550,6 +3557,7 @@ async def price_command(
     custom_charms: str = "no",
     text_designs: str = "no",
     upload: str | None = None,
+    fastpass: str | None = None,
     body_change: str = "no",
     extra_copy: app_commands.Range[int, 0, 50] = 0,
     discount: str = "no",
@@ -3563,6 +3571,8 @@ async def price_command(
         rows.append(("text designs", TEXT_DESIGN_PRICE[0], TEXT_DESIGN_PRICE[1]))
     if upload:
         rows.append(UPLOAD_OPTIONS[upload])
+    if fastpass:
+        rows.append(FASTPASS_OPTIONS[fastpass])
     if body_change == "yes":
         rows.append(("body change", BODY_CHANGE_PRICE[0], BODY_CHANGE_PRICE[1]))
     if extra_copy > 0:
