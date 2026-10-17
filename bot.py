@@ -3538,7 +3538,7 @@ EXTRA_COPY_PRICE = (1, 100)   # per copy
     text_designs="Add text designs? (optional)",
     upload="Upload option (optional)",
     fastpass="Fastpass (optional)",
-    matching="Matching two name necklaces? Doubles the price",
+    quantity="How many of the item? (two name necklaces are regular price + a body change each extra)",
     body_change="Body change (same design, different model)?",
     extra_copy="How many extra copies?",
     discount="Apply 10% discount?",
@@ -3550,7 +3550,6 @@ EXTRA_COPY_PRICE = (1, 100)   # per copy
     body_change=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
     upload=[app_commands.Choice(name=v[0], value=k) for k, v in UPLOAD_OPTIONS.items()],
     fastpass=[app_commands.Choice(name=v[0], value=k) for k, v in FASTPASS_OPTIONS.items()],
-    matching=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
     discount=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")],
 )
 async def price_command(
@@ -3560,31 +3559,36 @@ async def price_command(
     text_designs: str = "no",
     upload: str | None = None,
     fastpass: str | None = None,
-    matching: str = "no",
+    quantity: app_commands.Range[int, 1, 20] = 1,
     body_change: str = "no",
     extra_copy: app_commands.Range[int, 0, 50] = 0,
     discount: str = "no",
 ):
-    if matching == "yes" and item != "two_name_necklace":
-        await interaction.response.send_message("Matching only applies to the two name necklace.", ephemeral=True)
-        return
+    # a two name necklace stays regular price, each extra one is just a body change
+    mult = quantity
+    body_changes = 1 if body_change == "yes" else 0
+    if item == "two_name_necklace":
+        mult = 1
+        body_changes += quantity - 1
 
     rows = []
-    if item == "two_name_necklace" and matching == "yes":
+    if item:
         label, usd, robux = PRICE_ITEMS[item]
-        rows.append((f"{label} (matching)", usd * 2, robux * 2))
-    elif item:
-        rows.append(PRICE_ITEMS[item])
+        if quantity > 1:
+            label += f" x{quantity}"
+        rows.append((label, usd * mult, robux * mult))
     if custom_charms == "yes":
-        rows.append(("custom charms", CUSTOM_CHARM_PRICE[0], CUSTOM_CHARM_PRICE[1]))
+        rows.append(("custom charms", CUSTOM_CHARM_PRICE[0] * mult, CUSTOM_CHARM_PRICE[1] * mult))
     if text_designs == "yes":
-        rows.append(("text designs", TEXT_DESIGN_PRICE[0], TEXT_DESIGN_PRICE[1]))
+        rows.append(("text designs", TEXT_DESIGN_PRICE[0] * mult, TEXT_DESIGN_PRICE[1] * mult))
     if upload:
-        rows.append(UPLOAD_OPTIONS[upload])
+        label, usd, robux = UPLOAD_OPTIONS[upload]
+        rows.append((label, usd * mult, robux * mult))
     if fastpass:
         rows.append(FASTPASS_OPTIONS[fastpass])
-    if body_change == "yes":
-        rows.append(("body change", BODY_CHANGE_PRICE[0], BODY_CHANGE_PRICE[1]))
+    if body_changes > 0:
+        label = "body change" if body_changes == 1 else f"body change x{body_changes}"
+        rows.append((label, BODY_CHANGE_PRICE[0] * body_changes, BODY_CHANGE_PRICE[1] * body_changes))
     if extra_copy > 0:
         label = "extra copy" if extra_copy == 1 else f"extra copy x{extra_copy}"
         rows.append((label, EXTRA_COPY_PRICE[0] * extra_copy, EXTRA_COPY_PRICE[1] * extra_copy))
