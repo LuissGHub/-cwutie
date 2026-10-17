@@ -3571,27 +3571,28 @@ async def price_command(
         mult = 1
         body_changes += quantity - 1
 
+    tag = f" x{quantity}" if quantity > 1 else ""
+
     rows = []
     if item:
         label, usd, robux = PRICE_ITEMS[item]
-        if quantity > 1:
-            label += f" x{quantity}"
-        rows.append((label, usd * mult, robux * mult))
+        rows.append((label + tag, usd * mult, robux * mult))
     if custom_charms == "yes":
-        rows.append(("custom charms", CUSTOM_CHARM_PRICE[0] * mult, CUSTOM_CHARM_PRICE[1] * mult))
+        rows.append(("custom charms" + tag, CUSTOM_CHARM_PRICE[0] * mult, CUSTOM_CHARM_PRICE[1] * mult))
     if text_designs == "yes":
-        rows.append(("text designs", TEXT_DESIGN_PRICE[0] * mult, TEXT_DESIGN_PRICE[1] * mult))
+        rows.append(("text designs" + tag, TEXT_DESIGN_PRICE[0] * mult, TEXT_DESIGN_PRICE[1] * mult))
     if upload:
         label, usd, robux = UPLOAD_OPTIONS[upload]
-        rows.append((label, usd * mult, robux * mult))
+        rows.append((label + tag, usd * mult, robux * mult))
     if fastpass:
         rows.append(FASTPASS_OPTIONS[fastpass])
     if body_changes > 0:
         label = "body change" if body_changes == 1 else f"body change x{body_changes}"
         rows.append((label, BODY_CHANGE_PRICE[0] * body_changes, BODY_CHANGE_PRICE[1] * body_changes))
     if extra_copy > 0:
-        label = "extra copy" if extra_copy == 1 else f"extra copy x{extra_copy}"
-        rows.append((label, EXTRA_COPY_PRICE[0] * extra_copy, EXTRA_COPY_PRICE[1] * extra_copy))
+        copies = extra_copy * mult
+        label = "extra copy" if copies == 1 else f"extra copy x{copies}"
+        rows.append((label, EXTRA_COPY_PRICE[0] * copies, EXTRA_COPY_PRICE[1] * copies))
 
     if not rows:
         await interaction.response.send_message("Pick at least an item, an upload option, or an add-on.", ephemeral=True)
