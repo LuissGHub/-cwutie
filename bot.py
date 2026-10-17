@@ -3590,9 +3590,8 @@ async def price_command(
         label = "body change" if body_changes == 1 else f"body change x{body_changes}"
         rows.append((label, BODY_CHANGE_PRICE[0] * body_changes, BODY_CHANGE_PRICE[1] * body_changes))
     if extra_copy > 0:
-        copies = extra_copy * mult
-        label = "extra copy" if copies == 1 else f"extra copy x{copies}"
-        rows.append((label, EXTRA_COPY_PRICE[0] * copies, EXTRA_COPY_PRICE[1] * copies))
+        label = "extra copy" if extra_copy == 1 else f"extra copy x{extra_copy}"
+        rows.append((label, EXTRA_COPY_PRICE[0] * extra_copy, EXTRA_COPY_PRICE[1] * extra_copy))
 
     if not rows:
         await interaction.response.send_message("Pick at least an item, an upload option, or an add-on.", ephemeral=True)
