@@ -2925,14 +2925,14 @@ bot.tree.add_command(role_group)
 
 
 # ------------------------------------------------------------
-# Commands - Switch (move a ticket through unpaid → paid → fp → priority → upload → completed)
+# Commands - Switch (move a ticket through unpaid → fp → priority → paid → upload → completed)
 # ------------------------------------------------------------
 
 SWITCH_STAGES = [
     ("unpaid", "switch_unpaid_category_id"),
-    ("paid", "switch_paid_category_id"),
     ("fp", "switch_fp_category_id"),
     ("priority", "switch_priority_category_id"),
+    ("paid", "switch_paid_category_id"),
     ("upload", "switch_upload_category_id"),
     ("completed", "switch_completed_category_id"),
 ]
@@ -2982,7 +2982,7 @@ async def switch_setup(
     await interaction.response.send_message(f"{CHECK} `/switch` will move tickets: {' → '.join(parts)}", ephemeral=True)
 
 
-@bot.tree.command(name="switch", description="Move this ticket to the next stage (unpaid → paid → fp → priority → upload → completed)")
+@bot.tree.command(name="switch", description="Move this ticket to the next stage (unpaid → fp → priority → paid → upload → completed)")
 @app_commands.checks.has_permissions(manage_channels=True)
 @app_commands.describe(stage="Optional: jump to a specific stage instead of the next one")
 @app_commands.choices(stage=[app_commands.Choice(name=name, value=name) for name, _ in SWITCH_STAGES])
