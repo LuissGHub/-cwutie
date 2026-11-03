@@ -67,6 +67,7 @@ SETTINGS_COLUMNS = [
     "showcase_channel_id", "showcase_text", "showcase_theme", "showcase_image2_url", "showcase_image3_url",
     "fastpass_role_ids",
     "switch_unpaid_category_id", "switch_paid_category_id",
+    "switch_fp_category_id", "switch_priority_category_id",
     "switch_upload_category_id", "switch_completed_category_id",
     "quickleave_enabled", "quickleave_minutes", "quickleave_log_channel_id",
 ]
@@ -2924,12 +2925,14 @@ bot.tree.add_command(role_group)
 
 
 # ------------------------------------------------------------
-# Commands - Switch (move a ticket through unpaid → paid → upload → completed)
+# Commands - Switch (move a ticket through unpaid → paid → fp → priority → upload → completed)
 # ------------------------------------------------------------
 
 SWITCH_STAGES = [
     ("unpaid", "switch_unpaid_category_id"),
     ("paid", "switch_paid_category_id"),
+    ("fp", "switch_fp_category_id"),
+    ("priority", "switch_priority_category_id"),
     ("upload", "switch_upload_category_id"),
     ("completed", "switch_completed_category_id"),
 ]
@@ -2940,17 +2943,31 @@ SWITCH_STAGES = [
 @app_commands.describe(
     unpaid="Category your unpaid tickets live in",
     paid="Category for paid tickets",
+    fp="Category for fast pass tickets (leave blank to keep the current one)",
+    priority="Category for priority tickets (leave blank to keep the current one)",
     upload="Category for tickets waiting on upload (leave blank to keep the current one)",
     completed="Category for completed tickets (leave blank to keep the current one)",
 )
-async def switch_setup(interaction: discord.Interaction, unpaid: discord.CategoryChannel, paid: discord.CategoryChannel, upload: discord.CategoryChannel | None = None, completed: discord.CategoryChannel | None = None):
+async def switch_setup(
+    interaction: discord.Interaction,
+    unpaid: discord.CategoryChannel,
+    paid: discord.CategoryChannel,
+    fp: discord.CategoryChannel | None = None,
+    priority: discord.CategoryChannel | None = None,
+    upload: discord.CategoryChannel | None = None,
+    completed: discord.CategoryChannel | None = None,
+):
     guild = guild_only(interaction)
-    given = [c for c in (unpaid, paid, upload, completed) if c is not None]
+    given = [c for c in (unpaid, paid, fp, priority, upload, completed) if c is not None]
     if len({c.id for c in given}) != len(given):
         await interaction.response.send_message("Each stage needs its own category - I got the same one twice.", ephemeral=True)
         return
 
     updates = dict(switch_unpaid_category_id=str(unpaid.id), switch_paid_category_id=str(paid.id))
+    if fp is not None:
+        updates["switch_fp_category_id"] = str(fp.id)
+    if priority is not None:
+        updates["switch_priority_category_id"] = str(priority.id)
     if upload is not None:
         updates["switch_upload_category_id"] = str(upload.id)
     if completed is not None:
@@ -2965,7 +2982,7 @@ async def switch_setup(interaction: discord.Interaction, unpaid: discord.Categor
     await interaction.response.send_message(f"{CHECK} `/switch` will move tickets: {' → '.join(parts)}", ephemeral=True)
 
 
-@bot.tree.command(name="switch", description="Move this ticket to the next stage (unpaid → paid → upload → completed)")
+@bot.tree.command(name="switch", description="Move this ticket to the next stage (unpaid → paid → fp → priority → upload → completed)")
 @app_commands.checks.has_permissions(manage_channels=True)
 @app_commands.describe(stage="Optional: jump to a specific stage instead of the next one")
 @app_commands.choices(stage=[app_commands.Choice(name=name, value=name) for name, _ in SWITCH_STAGES])
@@ -2990,11 +3007,17 @@ async def switch_command(interaction: discord.Interaction, stage: str | None = N
         return
 
     if stage is None:
+        # next stage in the chain that actually has a category set (skips any stage you haven't configured)
         idx = names.index(current) + 1
-        if idx >= len(names):
-            await interaction.response.send_message("This ticket is already in the last stage (completed).", ephemeral=True)
+        target = None
+        while idx < len(names):
+            if category_ids[names[idx]]:
+                target = names[idx]
+                break
+            idx += 1
+        if target is None:
+            await interaction.response.send_message("This ticket is already in the last stage.", ephemeral=True)
             return
-        target = names[idx]
     else:
         target = stage
         if target == current:
