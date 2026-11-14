@@ -1314,6 +1314,21 @@ def safe_webhook_name(name: str | None) -> str:
     return name[:80]
 
 
+_avatar_cache: dict[int, str | None] = {}
+
+
+async def current_avatar_url(author_id, fallback):
+    if not author_id:
+        return fallback
+    if author_id not in _avatar_cache:
+        try:
+            user = await bot.fetch_user(author_id)
+            _avatar_cache[author_id] = user.display_avatar.url
+        except discord.HTTPException:
+            _avatar_cache[author_id] = None
+    return _avatar_cache[author_id] or fallback
+
+
 async def post_restored_vouch(channel: discord.TextChannel, webhook: discord.Webhook | None, row, files: list[tuple[str, bytes]], show_date: bool):
     content = row["content"] or ""
     if show_date:
@@ -1324,7 +1339,7 @@ async def post_restored_vouch(channel: discord.TextChannel, webhook: discord.Web
             pass
     content = content[:2000]
     name = row["author_name"] or "unknown"
-    avatar = row["author_avatar_url"] or None
+    avatar = await current_avatar_url(row["author_id"], row["author_avatar_url"]) or None
     no_mentions = discord.AllowedMentions.none()
 
     def make_files():
@@ -1370,6 +1385,7 @@ async def run_vouch_restore(interaction: discord.Interaction, source_gid: int, c
     posted = failed = 0
     skipped = 0
     try:
+        _avatar_cache.clear()
         rows = db_all("SELECT * FROM vouches WHERE guild_id = ? ORDER BY created_at ASC, id ASC", (source_gid,))
 
         # purge restored copies whose channel was deleted
