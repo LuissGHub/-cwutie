@@ -1371,7 +1371,22 @@ async def run_vouch_restore(interaction: discord.Interaction, source_gid: int, c
     skipped = 0
     try:
         rows = db_all("SELECT * FROM vouches WHERE guild_id = ? ORDER BY created_at ASC, id ASC", (source_gid,))
-        done_keys = {r["origin_key"] for r in db_all("SELECT origin_key FROM vouches WHERE guild_id = ? AND origin_key IS NOT NULL", (guild.id,))}
+
+        # purge restored copies whose channel was deleted
+        conn = get_db()
+        try:
+            for r in conn.execute("SELECT id, channel_id FROM vouches WHERE guild_id = ? AND origin_key IS NOT NULL", (guild.id,)).fetchall():
+                if guild.get_channel(r["channel_id"]) is None:
+                    conn.execute("DELETE FROM vouch_files WHERE vouch_id = ?", (r["id"],))
+                    conn.execute("DELETE FROM vouches WHERE id = ?", (r["id"],))
+            conn.commit()
+        finally:
+            conn.close()
+
+        # only skip ones already restored INTO THIS channel
+        done_keys = {r["origin_key"] for r in db_all(
+            "SELECT origin_key FROM vouches WHERE guild_id = ? AND channel_id = ? AND origin_key IS NOT NULL",
+            (guild.id, channel.id))}
         todo = [r for r in rows if f"{source_gid}:{r['message_id']}" not in done_keys]
         skipped = len(rows) - len(todo)
         total = len(todo)
@@ -1615,6 +1630,13 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
         await remove_waitlist_entry_by_channel(bot, channel.guild.id, channel.id)
     except Exception as e:
         print(f"Failed to auto-remove waitlist entry for deleted channel {channel.id}: {e}")
+
+    # clean up restored vouch copies that lived in the deleted channel
+    try:
+        db_run("DELETE FROM vouch_files WHERE vouch_id IN (SELECT id FROM vouches WHERE guild_id = ? AND channel_id = ? AND origin_key IS NOT NULL)", (channel.guild.id, channel.id))
+        db_run("DELETE FROM vouches WHERE guild_id = ? AND channel_id = ? AND origin_key IS NOT NULL", (channel.guild.id, channel.id))
+    except Exception as e:
+        print(f"Failed to clean up restored vouches for deleted channel {channel.id}: {e}")
 
 
 @bot.event
@@ -3086,14 +3108,6 @@ async def vouch_setup(interaction: discord.Interaction, channel: discord.TextCha
     )
 
 
-@bot.tree.command(name="vouch_clear", description="Turn off vouch auto-removal")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def vouch_clear(interaction: discord.Interaction):
-    guild = guild_only(interaction)
-    upsert_settings(guild.id, vouch_channel_id="", waitlist_role_id="")
-    await interaction.response.send_message(f"{CHECK} Vouch auto-removal disabled. (Your saved vouch backup is kept.)", ephemeral=True)
-
-
 # ------------------------------------------------------------
 # Commands - Vouch Restorer (backup + restore into a new server + auto channel count)
 # ------------------------------------------------------------
@@ -3145,35 +3159,6 @@ async def vouch_backup(interaction: discord.Interaction, channel: discord.TextCh
     )
 
 
-@bot.tree.command(name="vouch_status", description="See how many vouches are backed up (and which old servers have a backup you can restore)")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def vouch_status(interaction: discord.Interaction):
-    guild = guild_only(interaction)
-    settings = get_settings(guild.id)
-    cid = settings["vouch_channel_id"] if settings else None
-    count_on = bool(settings and settings["vouch_count_enabled"] == "1")
-
-    lines = [
-        f"**Vouch channel:** {f'<#{cid}>' if cid else 'not set (use `/vouch_setup`)'}",
-        f"**Backed up from this server:** {vouch_total(guild.id)}",
-        f"**Auto channel count:** {'on' if count_on else 'off'}",
-    ]
-
-    others = db_all(
-        "SELECT guild_id, COUNT(*) AS n, MAX(created_at) AS last FROM vouches WHERE guild_id != ? GROUP BY guild_id ORDER BY n DESC",
-        (guild.id,),
-    )
-    if others:
-        lines.append("\n**Backups from other servers (restorable with `/vouch_restore`):**")
-        for r in others[:15]:
-            g = bot.get_guild(r["guild_id"])
-            name = g.name if g else "server I'm no longer in"
-            lines.append(f"• {name} (`{r['guild_id']}`) - {r['n']} vouches, last one {r['last'][:10]}")
-
-    embed = discord.Embed(title="Vouch backup", description="\n".join(lines), color=get_theme_color("pink"))
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
 async def vouch_source_autocomplete(interaction: discord.Interaction, current: str):
     rows = db_all("SELECT guild_id, COUNT(*) AS n FROM vouches GROUP BY guild_id ORDER BY n DESC")
     choices = []
@@ -3213,7 +3198,7 @@ async def vouch_restore(interaction: discord.Interaction, source: str, channel: 
     rows = db_one("SELECT COUNT(*) AS n FROM vouches WHERE guild_id = ?", (source_gid,))
     total = rows["n"] if rows else 0
     if total == 0:
-        await interaction.response.send_message(f"I don't have any vouches backed up for server `{source_gid}`. Check `/vouch_status` for the backups I have.", ephemeral=True)
+        await interaction.response.send_message(f"I don't have any vouches backed up for server `{source_gid}`. Pick one from the list when you type the `source` option.", ephemeral=True)
         return
 
     perms = channel.permissions_for(guild.me)
