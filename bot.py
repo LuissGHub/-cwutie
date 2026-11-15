@@ -1226,9 +1226,41 @@ _vouch_last_rename: dict[int, float] = {}
 _vouch_busy: set[int] = set()
 
 
-def vouch_total(guild_id: int) -> int:
-    row = db_one("SELECT COUNT(*) AS n FROM vouches WHERE guild_id = ?", (guild_id,))
+def vouch_total(guild_id: int, channel_id: int | None = None) -> int:
+    # with a channel, only count vouches that live in that channel (so old + restored copies don't double up)
+    if channel_id is not None:
+        row = db_one("SELECT COUNT(*) AS n FROM vouches WHERE guild_id = ? AND channel_id = ?", (guild_id, channel_id))
+    else:
+        row = db_one("SELECT COUNT(*) AS n FROM vouches WHERE guild_id = ?", (guild_id,))
     return row["n"] if row else 0
+
+
+# a restored copy is skipped when its original is also in the same backup, so nothing posts twice
+_RESTORABLE_WHERE = (
+    "v.guild_id = ? AND NOT (v.origin_key IS NOT NULL AND EXISTS ("
+    "SELECT 1 FROM vouches o WHERE o.guild_id = v.guild_id AND o.origin_key IS NULL "
+    "AND (CAST(o.guild_id AS TEXT) || ':' || CAST(o.message_id AS TEXT)) = v.origin_key))"
+)
+
+
+def restorable_count(source_gid: int, exclude_channel_id: int | None = None) -> int:
+    sql = f"SELECT COUNT(*) AS n FROM vouches v WHERE {_RESTORABLE_WHERE}"
+    params: tuple = (source_gid,)
+    if exclude_channel_id is not None:
+        sql += " AND v.channel_id != ?"
+        params += (exclude_channel_id,)
+    row = db_one(sql, params)
+    return row["n"] if row else 0
+
+
+def restorable_rows(source_gid: int, exclude_channel_id: int | None = None):
+    sql = f"SELECT v.* FROM vouches v WHERE {_RESTORABLE_WHERE}"
+    params: tuple = (source_gid,)
+    if exclude_channel_id is not None:
+        sql += " AND v.channel_id != ?"
+        params += (exclude_channel_id,)
+    sql += " ORDER BY v.created_at ASC, v.id ASC"
+    return db_all(sql, params)
 
 
 def request_vouch_count_update(guild_id: int) -> None:
@@ -1329,15 +1361,8 @@ async def current_avatar_url(author_id, fallback):
     return _avatar_cache[author_id] or fallback
 
 
-async def post_restored_vouch(channel: discord.TextChannel, webhook: discord.Webhook | None, row, files: list[tuple[str, bytes]], show_date: bool):
-    content = row["content"] or ""
-    if show_date:
-        try:
-            ts = int(datetime.fromisoformat(row["created_at"]).timestamp())
-            content = f"{content}\n-# originally posted <t:{ts}:D>".strip()
-        except ValueError:
-            pass
-    content = content[:2000]
+async def post_restored_vouch(channel: discord.TextChannel, webhook: discord.Webhook | None, row, files: list[tuple[str, bytes]]):
+    content = (row["content"] or "")[:2000]
     name = row["author_name"] or "unknown"
     avatar = await current_avatar_url(row["author_id"], row["author_avatar_url"]) or None
     no_mentions = discord.AllowedMentions.none()
@@ -1378,7 +1403,7 @@ async def post_restored_vouch(channel: discord.TextChannel, webhook: discord.Web
     return None
 
 
-async def run_vouch_restore(interaction: discord.Interaction, source_gid: int, channel: discord.TextChannel, show_dates: bool) -> None:
+async def run_vouch_restore(interaction: discord.Interaction, source_gid: int, channel: discord.TextChannel) -> None:
     guild = interaction.guild
     _vouch_busy.add(guild.id)
     webhook = None
@@ -1386,7 +1411,8 @@ async def run_vouch_restore(interaction: discord.Interaction, source_gid: int, c
     skipped = 0
     try:
         _avatar_cache.clear()
-        rows = db_all("SELECT * FROM vouches WHERE guild_id = ? ORDER BY created_at ASC, id ASC", (source_gid,))
+        # same-server restore also skips anything already sitting in the target channel
+        rows = restorable_rows(source_gid, channel.id if source_gid == guild.id else None)
 
         # purge restored copies whose channel was deleted
         conn = get_db()
@@ -1415,7 +1441,7 @@ async def run_vouch_restore(interaction: discord.Interaction, source_gid: int, c
 
         for i, row in enumerate(todo, start=1):
             files = [(f["filename"], bytes(f["data"])) for f in db_all("SELECT filename, data FROM vouch_files WHERE vouch_id = ? ORDER BY id", (row["id"],))]
-            msg = await post_restored_vouch(channel, webhook, row, files, show_dates)
+            msg = await post_restored_vouch(channel, webhook, row, files)
             if msg is None:
                 failed += 1
             else:
@@ -1469,12 +1495,11 @@ async def run_vouch_restore(interaction: discord.Interaction, source_gid: int, c
 
 
 class VouchRestoreConfirmView(discord.ui.View):
-    def __init__(self, owner_id: int, source_gid: int, channel: discord.TextChannel, show_dates: bool):
+    def __init__(self, owner_id: int, source_gid: int, channel: discord.TextChannel):
         super().__init__(timeout=120)
         self.owner_id = owner_id
         self.source_gid = source_gid
         self.channel = channel
-        self.show_dates = show_dates
 
     @discord.ui.button(label="Restore vouches", style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1485,7 +1510,7 @@ class VouchRestoreConfirmView(discord.ui.View):
             await interaction.response.edit_message(content="A vouch backup/restore is already running here - wait for it to finish.", view=None)
             return
         await interaction.response.edit_message(content="Starting restore...", view=None)
-        await run_vouch_restore(interaction, self.source_gid, self.channel, self.show_dates)
+        await run_vouch_restore(interaction, self.source_gid, self.channel)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1513,7 +1538,7 @@ async def update_vouch_counts():
             continue
 
         _vouch_count_dirty.discard(gid)
-        new_name = build_counted_channel_name(channel.name, vouch_total(gid))
+        new_name = build_counted_channel_name(channel.name, vouch_total(gid, channel.id))
         if new_name == channel.name:
             continue
         try:
@@ -3128,18 +3153,16 @@ async def vouch_setup(interaction: discord.Interaction, channel: discord.TextCha
 # Commands - Vouch Restorer (backup + restore into a new server + auto channel count)
 # ------------------------------------------------------------
 
-@bot.tree.command(name="vouch_backup", description="Save every vouch already in the vouch channel to the backup (new vouches save automatically)")
+@bot.tree.command(name="vouch_backup", description="Save every vouch already in the vouch channel to the backup")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(channel="Vouch channel to scan (defaults to the one from /vouch_setup)")
-async def vouch_backup(interaction: discord.Interaction, channel: discord.TextChannel | None = None):
+async def vouch_backup(interaction: discord.Interaction):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
+    cid = settings["vouch_channel_id"] if settings else None
+    found = guild.get_channel(int(cid)) if cid else None
+    channel = found if isinstance(found, discord.TextChannel) else None
     if channel is None:
-        cid = settings["vouch_channel_id"] if settings else None
-        found = guild.get_channel(int(cid)) if cid else None
-        channel = found if isinstance(found, discord.TextChannel) else None
-    if channel is None:
-        await interaction.response.send_message("Pick a channel, or run `/vouch_setup` first so I know which one is your vouch channel.", ephemeral=True)
+        await interaction.response.send_message("Run `/vouch_setup` first so I know which one is your vouch channel.", ephemeral=True)
         return
     if guild.id in _vouch_busy:
         await interaction.response.send_message("A vouch backup/restore is already running here - wait for it to finish.", ephemeral=True)
@@ -3170,49 +3193,50 @@ async def vouch_backup(interaction: discord.Interaction, channel: discord.TextCh
 
     await interaction.followup.send(
         f"{CHECK} Scanned **{scanned}** message{'s' if scanned != 1 else ''} in {channel.mention} and saved **{new}** new vouch{'es' if new != 1 else ''}.\n"
-        f"Total vouches in the backup: **{vouch_total(guild.id)}**",
+        f"Vouches saved from {channel.mention}: **{vouch_total(guild.id, channel.id)}**",
         ephemeral=True,
     )
 
 
 async def vouch_source_autocomplete(interaction: discord.Interaction, current: str):
-    rows = db_all("SELECT guild_id, COUNT(*) AS n FROM vouches GROUP BY guild_id ORDER BY n DESC")
+    rows = db_all(
+        "SELECT v.guild_id AS guild_id, COUNT(*) AS n FROM vouches v WHERE NOT (v.origin_key IS NOT NULL AND EXISTS ("
+        "SELECT 1 FROM vouches o WHERE o.guild_id = v.guild_id AND o.origin_key IS NULL "
+        "AND (CAST(o.guild_id AS TEXT) || ':' || CAST(o.message_id AS TEXT)) = v.origin_key)) "
+        "GROUP BY v.guild_id ORDER BY n DESC"
+    )
     choices = []
     for r in rows:
-        if interaction.guild_id and r["guild_id"] == interaction.guild_id:
-            continue
-        g = bot.get_guild(r["guild_id"])
-        label = f"{g.name if g else 'old server'} ({r['guild_id']}) - {r['n']} vouches"
+        if r["guild_id"] == interaction.guild_id:
+            label = f"this server ({r['guild_id']}) - {r['n']} vouches"
+        else:
+            g = bot.get_guild(r["guild_id"])
+            label = f"{g.name if g else 'old server'} ({r['guild_id']}) - {r['n']} vouches"
         if current and current.lower() not in label.lower():
             continue
         choices.append(app_commands.Choice(name=label[:100], value=str(r["guild_id"])))
     return choices[:25]
 
 
-@bot.tree.command(name="vouch_restore", description="Re-post the backed-up vouches from your old server into a channel here")
+@bot.tree.command(name="vouch_restore", description="Re-post backed-up vouches (from an old server, or this one) into a channel here")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(
     source="Which backup to restore (pick from the list, or paste the old server's ID)",
     channel="Channel to post the restored vouches in (becomes your vouch channel if none is set)",
-    show_dates="Add a small 'originally posted' date under each restored vouch",
 )
 @app_commands.autocomplete(source=vouch_source_autocomplete)
-async def vouch_restore(interaction: discord.Interaction, source: str, channel: discord.TextChannel, show_dates: bool = False):
+async def vouch_restore(interaction: discord.Interaction, source: str, channel: discord.TextChannel):
     guild = guild_only(interaction)
     try:
         source_gid = int(source.strip())
     except ValueError:
         await interaction.response.send_message("Pick a backup from the list or paste the old server's ID (numbers only).", ephemeral=True)
         return
-    if source_gid == guild.id:
-        await interaction.response.send_message("That's this server - pick the backup from your old one.", ephemeral=True)
-        return
     if guild.id in _vouch_busy:
         await interaction.response.send_message("A vouch backup/restore is already running here - wait for it to finish.", ephemeral=True)
         return
 
-    rows = db_one("SELECT COUNT(*) AS n FROM vouches WHERE guild_id = ?", (source_gid,))
-    total = rows["n"] if rows else 0
+    total = restorable_count(source_gid, channel.id if source_gid == guild.id else None)
     if total == 0:
         await interaction.response.send_message(f"I don't have any vouches backed up for server `{source_gid}`. Pick one from the list when you type the `source` option.", ephemeral=True)
         return
@@ -3223,7 +3247,9 @@ async def vouch_restore(interaction: discord.Interaction, source: str, channel: 
         return
 
     settings = get_settings(guild.id)
-    if not settings or not settings["vouch_channel_id"]:
+    saved_id = settings["vouch_channel_id"] if settings else None
+    if not saved_id or guild.get_channel(int(saved_id)) is None:
+        # no vouch channel yet, or the old one was deleted
         upsert_settings(guild.id, vouch_channel_id=str(channel.id))
 
     note = ""
@@ -3233,7 +3259,7 @@ async def vouch_restore(interaction: discord.Interaction, source: str, channel: 
     await interaction.response.send_message(
         f"Restore **{total}** vouch{'es' if total != 1 else ''} from server `{source_gid}` into {channel.mention}?\n"
         f"They'll post in their original order, one at a time (about {max(1, round(total * VOUCH_RESTORE_DELAY_SECONDS / 60))} min).{note}",
-        view=VouchRestoreConfirmView(interaction.user.id, source_gid, channel, show_dates),
+        view=VouchRestoreConfirmView(interaction.user.id, source_gid, channel),
         ephemeral=True,
     )
 
@@ -3256,7 +3282,7 @@ async def vouch_count(interaction: discord.Interaction, enabled: bool = True):
         return
 
     request_vouch_count_update(guild.id)
-    total = vouch_total(guild.id)
+    total = vouch_total(guild.id, channel.id)
     preview = build_counted_channel_name(channel.name, total)
     await interaction.response.send_message(
         f"{CHECK} Auto vouch count is on. {channel.mention} will be renamed to `{preview}` and the number updates as new vouches come in (Discord only lets channels be renamed about twice every 10 minutes, so it can lag a few minutes).\n"
@@ -3612,6 +3638,100 @@ async def removeuser(interaction: discord.Interaction, user: discord.Member):
         return
 
     await interaction.response.send_message(f"{CHECK} Removed {user.mention} from {channel.mention}.", ephemeral=True)
+
+
+# ------------------------------------------------------------
+# Commands - Ticket reminder (DM)
+# ------------------------------------------------------------
+
+REMIND_TEMPLATE_NAME = "remind"
+
+REMIND_DEFAULT_TEMPLATE = (
+    "***<a:0000:1488359841830404208> {mention} reminder<a:0000:1488359841830404208>***\n\n"
+    "*<:001_DNS_ggcwutie:1521723633175888002> please reply to your ticket {channel} within **24 hrs***\n"
+    "*<:003_divDNS:1525296729715511396> no response = server ban*"
+)
+
+
+class RemindTemplateModal(discord.ui.Modal, title="Reminder DM Template"):
+    template = discord.ui.TextInput(
+        label="Use {mention} {channel} {username}",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=1900,
+    )
+
+    def __init__(self, prefill: str | None = None):
+        super().__init__()
+        self.template.default = prefill or REMIND_DEFAULT_TEMPLATE
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild_id = interaction.guild_id
+        template_val = str(self.template)
+        now = datetime.now(timezone.utc).isoformat()
+
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM redeem_templates WHERE guild_id = ? AND name = ?", (guild_id, REMIND_TEMPLATE_NAME))
+        if cur.fetchone():
+            cur.execute(
+                "UPDATE redeem_templates SET template = ?, updated_at = ? WHERE guild_id = ? AND name = ?",
+                (template_val, now, guild_id, REMIND_TEMPLATE_NAME),
+            )
+        else:
+            cur.execute(
+                "INSERT INTO redeem_templates (guild_id, name, template, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (guild_id, REMIND_TEMPLATE_NAME, template_val, now, now),
+            )
+        conn.commit()
+        conn.close()
+
+        await interaction.response.send_message(f"{CHECK} Reminder template saved! Use `/remind user:@someone` to send it.", ephemeral=True)
+
+
+@bot.tree.command(name="remind_set", description="Edit the DM text that /remind sends")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def remind_set(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    row = db_one("SELECT template FROM redeem_templates WHERE guild_id = ? AND name = ?", (guild.id, REMIND_TEMPLATE_NAME))
+    await interaction.response.send_modal(RemindTemplateModal(prefill=row["template"] if row else None))
+
+
+@bot.tree.command(name="remind", description="DM a member a reminder to respond to their ticket (this channel)")
+@app_commands.checks.has_permissions(manage_channels=True)
+@app_commands.describe(user="The member to remind")
+async def remind(interaction: discord.Interaction, user: discord.Member):
+    guild = guild_only(interaction)
+    channel = interaction.channel
+
+    if user.bot:
+        await interaction.response.send_message("I can't DM a bot.", ephemeral=True)
+        return
+
+    row = db_one("SELECT template FROM redeem_templates WHERE guild_id = ? AND name = ?", (guild.id, REMIND_TEMPLATE_NAME))
+    template = row["template"] if row else REMIND_DEFAULT_TEMPLATE
+    dm_text = (
+        template
+        .replace("{mention}", user.mention)
+        .replace("{username}", user.name)
+        .replace("{channel}", channel.mention)
+        .replace("\\n", "\n")
+    )
+
+    if len(dm_text) > 2000:
+        await interaction.response.send_message("That reminder is over Discord's 2000 character limit. Trim it with `/remind_set`.", ephemeral=True)
+        return
+
+    try:
+        await user.send(dm_text)
+    except discord.Forbidden:
+        await interaction.response.send_message(f"I couldn't DM {user.mention}, they have their DMs closed.", ephemeral=True)
+        return
+    except discord.HTTPException as e:
+        await interaction.response.send_message(f"Couldn't send the DM: {str(e)[:150]}", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"{CHECK} Reminder sent to {user.mention}'s DMs.", ephemeral=True)
 
 
 # ------------------------------------------------------------
@@ -4042,27 +4162,6 @@ async def showcase_setup(interaction: discord.Interaction):
             "showcase_image3_url": settings["showcase_image3_url"],
         }
     await interaction.response.send_modal(ShowcaseSetupModal(prefill=prefill))
-
-
-@bot.tree.command(name="showcase_test", description="Preview the showcase post without sending it to the channel")
-@app_commands.describe(image="The commission photo to preview with")
-async def showcase_test(interaction: discord.Interaction, image: discord.Attachment):
-    guild = guild_only(interaction)
-    settings = get_settings(guild.id)
-    if not settings or not settings["showcase_text"]:
-        await interaction.response.send_message("Run `/showcase_setup` first.", ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=True)
-    file = await image.to_file()
-    theme = settings["showcase_theme"] or "pink"
-    embeds = [build_embed(title=None, description=settings["showcase_text"], theme=theme, image=f"attachment://{file.filename}")]
-    if settings["showcase_image2_url"]:
-        embeds.append(build_embed(title=None, description=None, theme=theme, image=settings["showcase_image2_url"]))
-    if settings["showcase_image3_url"]:
-        embeds.append(build_embed(title=None, description=None, theme=theme, image=settings["showcase_image3_url"]))
-
-    await interaction.followup.send(embeds=embeds, file=file, ephemeral=True)
 
 
 @bot.tree.command(name="showcase", description="Post a new showcase (in this channel/thread) with your saved template")
