@@ -3765,6 +3765,78 @@ async def remind2(interaction: discord.Interaction, user: discord.Member):
 
 
 # ------------------------------------------------------------
+# Commands - Forms (/ap, /self)
+# ------------------------------------------------------------
+
+AP_FORM_TEXT = """***ʚ . ୨ ap form ˚ɞ ** <:001_DNS_ggcradle:1521723847261294723>*
+
+*<:001_DNS_ggcwutie:1521723686187565078> roblox user & id ꒰ঌ໒꒱*
+-# *<:003_divcwutieDNS:1501274190026637362> ʚɞ {roblox_user}*
+*<:001_DNS_ggcwutie:1521723633175888002> roblox group & link ꒰ঌ໒꒱*
+-# *<:003_divcwutieDNS:1501274190026637362> ʚɞ {roblox_group}*
+*<:001_DNS_ggcwutie:1521723686187565078> discord user & id ꒰ঌ໒꒱*
+-# *<:003_divcwutieDNS:1501274190026637362> ʚɞ {discord_user}*
+*<:001_DNS_ggcwutie:1521723633175888002> **permanent** discord server link & server id ꒰ঌ໒꒱*
+-# *<:003_divcwutieDNS:1501274190026637362> ʚɞ {server}*
+
+✿﹒ . ๑ ︵ <:001_DNS_ggcradle:1521723847261294723> ︵ ๑ . ﹒✿
+
+ *<a:0000:1488556886918824068> type **na** if not applicable*"""
+
+SELF_FORM_TEXT = """***ʚ . ୨ self upl form ˚ɞ ** <:001_DNS_ggcradle:1521723847261294723>*
+
+*<:001_DNS_ggcwutie:1521723686187565078> roblox user & id ꒰ঌ໒꒱*
+-# *<:003_divcwutieDNS:1501274190026637362> ʚɞ {roblox_user}*
+*<:001_DNS_ggcwutie:1521723633175888002> roblox group & link ꒰ঌ໒꒱*
+-# *<:003_divcwutieDNS:1501274190026637362> ʚɞ {roblox_group}*
+*<:001_DNS_ggcwutie:1521723686187565078> discord user & id ꒰ঌ໒꒱*
+-# *<:003_divcwutieDNS:1501274190026637362> ʚɞ {discord_user}*
+
+✿﹒ . ๑ ︵ <:001_DNS_ggcradle:1521723847261294723> ︵ ๑ . ﹒✿
+
+ *<a:0000:1488556886918824068> type **na** if not applicable*"""
+
+FORM_MENTIONS = discord.AllowedMentions(everyone=False, roles=False, users=True)
+
+
+def fill_form(template: str, **values: str) -> str:
+    for key, value in values.items():
+        template = template.replace("{" + key + "}", value.strip())
+    return template.replace("ʚɞ *", "ʚɞ*")  # an empty input leaves just the bare ʚɞ
+
+
+@bot.tree.command(name="ap", description="Post the ap form with your answers filled in")
+@app_commands.describe(
+    roblox_user="roblox user & id",
+    roblox_group="roblox group & link",
+    discord_user="discord user & id",
+    server="permanent discord server link & server id",
+)
+async def ap_command(interaction: discord.Interaction, roblox_user: str, roblox_group: str, discord_user: str, server: str):
+    guild_only(interaction)
+    text = fill_form(AP_FORM_TEXT, roblox_user=roblox_user, roblox_group=roblox_group, discord_user=discord_user, server=server)
+    if len(text) > 2000:
+        await interaction.response.send_message("That's over Discord's 2000 character limit - shorten an answer.", ephemeral=True)
+        return
+    await interaction.response.send_message(text, allowed_mentions=FORM_MENTIONS)
+
+
+@bot.tree.command(name="self", description="Post the self upl form with your answers filled in")
+@app_commands.describe(
+    roblox_user="roblox user & id",
+    roblox_group="roblox group & link",
+    discord_user="discord user & id",
+)
+async def self_command(interaction: discord.Interaction, roblox_user: str, roblox_group: str, discord_user: str):
+    guild_only(interaction)
+    text = fill_form(SELF_FORM_TEXT, roblox_user=roblox_user, roblox_group=roblox_group, discord_user=discord_user)
+    if len(text) > 2000:
+        await interaction.response.send_message("That's over Discord's 2000 character limit - shorten an answer.", ephemeral=True)
+        return
+    await interaction.response.send_message(text, allowed_mentions=FORM_MENTIONS)
+
+
+# ------------------------------------------------------------
 # Commands - Moderation (ban)
 # ------------------------------------------------------------
 
