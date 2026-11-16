@@ -3734,6 +3734,36 @@ async def remind(interaction: discord.Interaction, user: discord.Member):
     await interaction.response.send_message(f"{CHECK} Reminder sent to {user.mention}'s DMs.", ephemeral=True)
 
 
+REMIND2_TEXT = (
+    "***<a:0000:1488359841830404208> {mention} reminder<a:0000:1488359841830404208>***\n\n"
+    "*<:001_DNS_ggcwutie:1521723633175888002> your ticket in /cwutie is waiting for your reply {channel}*"
+)
+
+
+@bot.tree.command(name="remind2", description="DM a member that their ticket is waiting for a reply (this channel)")
+@app_commands.checks.has_permissions(manage_channels=True)
+@app_commands.describe(user="The member to remind")
+async def remind2(interaction: discord.Interaction, user: discord.Member):
+    guild_only(interaction)
+
+    if user.bot:
+        await interaction.response.send_message("I can't DM a bot.", ephemeral=True)
+        return
+
+    dm_text = REMIND2_TEXT.replace("{mention}", user.mention).replace("{channel}", interaction.channel.mention)
+
+    try:
+        await user.send(dm_text)
+    except discord.Forbidden:
+        await interaction.response.send_message(f"I couldn't DM {user.mention}, they have their DMs closed.", ephemeral=True)
+        return
+    except discord.HTTPException as e:
+        await interaction.response.send_message(f"Couldn't send the DM: {str(e)[:150]}", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"{CHECK} Reminder sent to {user.mention}'s DMs.", ephemeral=True)
+
+
 # ------------------------------------------------------------
 # Commands - Moderation (ban)
 # ------------------------------------------------------------
