@@ -3807,7 +3807,7 @@ def fill_form(template: str, **values: str) -> str:
 
 @bot.tree.command(name="ap", description="Post the ap form with your answers filled in")
 @app_commands.describe(
-    roblox_user="roblox user & id",
+    roblox_user="all the boxes",
     roblox_group="roblox group & link",
     discord_user="discord user & id",
     server="permanent discord server link & server id",
@@ -3823,7 +3823,7 @@ async def ap_command(interaction: discord.Interaction, roblox_user: str, roblox_
 
 @bot.tree.command(name="self", description="Post the self upl form with your answers filled in")
 @app_commands.describe(
-    roblox_user="roblox user & id",
+    roblox_user="all the boxes",
     roblox_group="roblox group & link",
     discord_user="discord user & id",
 )
