@@ -4369,7 +4369,13 @@ async def showcase_command(interaction: discord.Interaction, image: discord.Atta
 # Commands - Price
 # ------------------------------------------------------------
 
-ROBUX_EMOJI = "<:ggcwutieDNSRobux:1554353658462732320>"
+ROBUX_EMOJI = "<:001DNSggcwutierbx:1574519900100366427>"
+PRICE_PAY_ICONS = "<:001DNSggcwutieca:1574519553201807391><:001DNSggcwutiepp:1574519932505423953>"
+PRICE_HEADER = "***ʚ . ୨ price ˚ɞ ** <:001_DNS_ggcradle:1521723847261294723>*"
+
+
+def price_line(label: str, robux: int, usd) -> str:
+    return f"***{label}***\n{robux:,} {ROBUX_EMOJI} ${usd} {PRICE_PAY_ICONS}"
 
 # key: (label, usd, robux)
 PRICE_ITEMS = {
@@ -4477,24 +4483,24 @@ async def price_command(
         await interaction.response.send_message("Pick at least an item, an upload option, or an add-on.", ephemeral=True)
         return
 
-    lines = [f"• **{r[0]}**\n`{r[2]:,}` {ROBUX_EMOJI} • `${r[1]}`" for r in rows]
+    lines = [price_line(r[0], r[2], r[1]) for r in rows]
 
     total_usd = sum(r[1] for r in rows)
     total_robux = sum(r[2] for r in rows)
 
     if len(rows) > 1:
-        lines.append(f"**total**\n`{total_robux:,}` {ROBUX_EMOJI} • `${total_usd}`")
+        lines.append(price_line("total", total_robux, total_usd))
 
     if discount == "yes":
         disc_robux = round(total_robux * 0.90)
         disc_usd = round(total_usd * 0.90, 2)
         disc_usd_text = f"{disc_usd:.2f}".rstrip("0").rstrip(".")
-        lines.append(f"**after 10% discount**\n`{disc_robux:,}` {ROBUX_EMOJI} • `${disc_usd_text}`")
+        lines.append(price_line("after 10% discount", disc_robux, disc_usd_text))
 
     # prices first, then the payment prompt at the bottom with the rbx / ca / pp buttons
-    description = "\n\n".join(lines) + "\n\n" + PAYMENT_PROMPT_TEXT
+    description = PRICE_HEADER + "\n\n" + "\n\n".join(lines) + "\n\n" + PAYMENT_PROMPT_TEXT
 
-    embed = discord.Embed(title="price", description=description, color=get_theme_color("pink"))
+    embed = discord.Embed(description=description, color=get_theme_color("pink"))
     await interaction.response.send_message(embed=embed, view=PaymentView())
 
 
