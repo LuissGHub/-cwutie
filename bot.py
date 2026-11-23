@@ -1607,7 +1607,12 @@ class PaymentButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         embed = build_embed(description=self.text, theme="pink")
-        await interaction.response.send_message(embed=embed)
+        # ack silently, then post as a normal channel message so there's no "Tap to see command" reply header
+        await interaction.response.defer()
+        try:
+            await interaction.channel.send(embed=embed)
+        except discord.HTTPException:
+            await interaction.followup.send(embed=embed)
 
 
 class PaymentView(discord.ui.View):
