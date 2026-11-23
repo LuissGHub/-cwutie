@@ -1556,6 +1556,70 @@ async def before_update_vouch_counts():
 
 
 # ------------------------------------------------------------
+# Payment views (shown under /price)
+# ------------------------------------------------------------
+
+PAYMENT_DIVIDER = "✿﹒ . ๑ ︵ <:001_DNS_ggcradle:1521723847261294723> ︵ ๑ . ﹒✿"
+
+PAYMENT_PROMPT_TEXT = (
+    f"{PAYMENT_DIVIDER}\n\n"
+    "*<:001_DNS_ggcwutie:1521723633175888002>please select your payment method below ꒰ঌ໒꒱*\n"
+    "-# *<:003_divcwutieDNS:1501274190026637362> must read all embeds attached for further information ʚɞ*"
+)
+
+PAYMENT_RBX_TEXT = (
+    "*ʚ . ୨ **rbx** ˚ɞ  <:001_DNS_ggcradle:1521723847261294723>*\n\n"
+    "*<:002_1_ggcwutieDNS:1530093242631061596> rblx plus (try in order)*\n"
+    "*<:001_DNS_ggcwutie:1521723686187565078> [@cwtiemeow](https://www.roblox.com/users/719077625/profile), display cheri*\n"
+    "*<:001_DNS_ggcwutie:1521723686187565078> [@sinfulzxo](https://www.roblox.com/users/2506300349/profile), display sin*\n"
+    "-# *<:003_divcwutieDNS:1501274190026637362> if both accounts are maxed type **.plus** ʚɞ*\n\n"
+    "*<:002_2_ggcwutieDNS:1530093266244993165> gamepass (30% tax)*\n"
+    "*<:001_DNS_ggcwutie:1521723686187565078> [game here](https://www.roblox.com/games/7252525638), ping <@358403435604869121> if paying through gp*\n\n"
+    f"{PAYMENT_DIVIDER}\n\n"
+    "*<a:0000:1488556886918824068> please attach a screenshot once payment is completed*"
+)
+
+PAYMENT_CA_TEXT = (
+    "*ʚ . ୨ **cwutie's ca** ˚ɞ  <:001_DNS_ggcradle:1521723847261294723>*\n\n"
+    "*<:001_DNS_ggcwutie:1521723686187565078> [$meowhiya](https://cash.app/$meowhiya)*\n\n"
+    "*<a:1white_paws:1517064987678343198> **do not** put \"ugc\" as the note ꒰ঌ໒꒱*\n"
+    "*<:001_DNS_ggcwutie:1521723633175888002> put \"food\" or \"gas money\" ꒰ঌ໒꒱*\n"
+    "-# *<:003_divcwutieDNS:1501274190026637362> must send with the right note ʚɞ*\n\n"
+    f"{PAYMENT_DIVIDER}\n\n"
+    "*<a:0000:1488556886918824068> please attach a screenshot once payment is completed*"
+)
+
+PAYMENT_PP_TEXT = (
+    "*ʚ . ୨ **cwutie's pp** ˚ɞ  <:001_DNS_ggcradle:1521723847261294723>*\n\n"
+    "*<:001_DNS_ggcwutie:1521723686187565078> [click here](https://paypal.me/LuisDelgadillo2000)*\n\n"
+    "*<a:1white_paws:1517064987678343198> **do not** put \"ugc\" as the note ꒰ঌ໒꒱*\n"
+    "*<:001_DNS_ggcwutie:1521723633175888002> put \"food\" or \"gas money\" ꒰ঌ໒꒱*\n"
+    "-# *<:003_divcwutieDNS:1501274190026637362> must send with the right note ʚɞ*\n\n"
+    f"{PAYMENT_DIVIDER}\n\n"
+    "*<a:0000:1488556886918824068> please attach a screenshot once payment is completed*"
+)
+
+
+class PaymentButton(discord.ui.Button):
+    def __init__(self, emoji: str, custom_id: str, text: str):
+        super().__init__(emoji=emoji, style=discord.ButtonStyle.secondary, custom_id=custom_id)
+        self.text = text
+
+    async def callback(self, interaction: discord.Interaction):
+        embed = build_embed(description=self.text, theme="pink")
+        await interaction.response.send_message(embed=embed)
+
+
+class PaymentView(discord.ui.View):
+    # persistent (timeout=None + fixed custom_ids), so the buttons keep working after a bot restart
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(PaymentButton("<:001DNSggcwutierbx:1574519900100366427>", "pay_rbx", PAYMENT_RBX_TEXT))
+        self.add_item(PaymentButton("<:001DNSggcwutieca:1574519553201807391>", "pay_ca", PAYMENT_CA_TEXT))
+        self.add_item(PaymentButton("<:001DNSggcwutiepp:1574519932505423953>", "pay_pp", PAYMENT_PP_TEXT))
+
+
+# ------------------------------------------------------------
 # Events
 # ------------------------------------------------------------
 
@@ -1563,6 +1627,7 @@ async def before_update_vouch_counts():
 async def on_ready():
     init_db()
     bot.add_view(VerifyView())
+    bot.add_view(PaymentView())
     if not check_fastpass_timers.is_running():
         check_fastpass_timers.start()
     if not check_temp_bans.is_running():
@@ -4421,8 +4486,11 @@ async def price_command(
         disc_usd_text = f"{disc_usd:.2f}".rstrip("0").rstrip(".")
         lines.append(f"**after 10% discount**\n`{disc_robux:,}` {ROBUX_EMOJI} • `${disc_usd_text}`")
 
-    embed = discord.Embed(title="price", description="\n\n".join(lines), color=get_theme_color("pink"))
-    await interaction.response.send_message(embed=embed)
+    # prices first, then the payment prompt at the bottom with the rbx / ca / pp buttons
+    description = "\n\n".join(lines) + "\n\n" + PAYMENT_PROMPT_TEXT
+
+    embed = discord.Embed(title="price", description=description, color=get_theme_color("pink"))
+    await interaction.response.send_message(embed=embed, view=PaymentView())
 
 
 # ------------------------------------------------------------
