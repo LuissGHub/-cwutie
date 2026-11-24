@@ -3960,6 +3960,28 @@ async def self_command(interaction: discord.Interaction, roblox_user: str, roblo
     await interaction.response.send_message(text, allowed_mentions=FORM_MENTIONS)
 
 
+PREVIEW_TEXT = """*ʚ . ୨ **{name}** ˚ɞ  <:001_DNS_ggcradle:1521723847261294723>*
+
+*<:001_DNS_ggcwutie:1521723686187565078> made by {made_by}*
+
+*<:001_DNS_ggcwutie:1521723633175888002> **DMCA** protected ꒰ঌ໒꒱*
+*<a:1white_paws:1517064987678343198> **do not** copy, steal, or recreate ꒰ঌ໒꒱*
+*<:001_DNS_ggcwutie:1521723633175888002> you may ask for this model to be used in your ugc ꒰ঌ໒꒱*
+
+✿﹒ . ๑ ︵ <:001_DNS_ggcradle:1521723847261294723> ︵ ๑ . ﹒✿"""
+
+
+@bot.tree.command(name="preview", description="Post the preview/DMCA message with the model name and creator filled in")
+@app_commands.describe(name="Model name (e.g. locket v4)", made_by="Who made it (default: /cwutie DNS)")
+async def preview_command(interaction: discord.Interaction, name: str, made_by: str = "/cwutie DNS"):
+    guild_only(interaction)
+    text = fill_form(PREVIEW_TEXT, name=name, made_by=made_by)
+    if len(text) > 2000:
+        await interaction.response.send_message("That's over Discord's 2000 character limit - shorten an answer.", ephemeral=True)
+        return
+    await interaction.response.send_message(text, allowed_mentions=FORM_MENTIONS)
+
+
 # ------------------------------------------------------------
 # Commands - Moderation (ban)
 # ------------------------------------------------------------
