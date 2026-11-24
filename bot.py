@@ -1033,28 +1033,52 @@ class ShowcaseSetupModal(discord.ui.Modal, title="Showcase Template"):
         max_length=4000,
         placeholder="The decorative header block - reused every showcase post",
     )
+    image2_url = discord.ui.TextInput(label="1st fixed image URL (posted under your photo)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.gif  (leave empty to remove)")
+    image3_url = discord.ui.TextInput(label="2nd fixed image URL (optional)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/xyz456.gif  (leave empty to remove)")
 
     def __init__(self, prefill: dict | None = None):
         super().__init__()
-        if prefill and prefill.get("showcase_text"):
-            self.showcase_text.default = prefill["showcase_text"]
+        if prefill:
+            if prefill.get("showcase_text"):
+                self.showcase_text.default = prefill["showcase_text"]
+            if prefill.get("showcase_image2_url"):
+                self.image2_url.default = prefill["showcase_image2_url"]
+            if prefill.get("showcase_image3_url"):
+                self.image3_url.default = prefill["showcase_image3_url"]
 
     async def on_submit(self, interaction: discord.Interaction):
         guild = guild_only(interaction)
-        text = str(self.showcase_text).replace("\\n", "\n")
-        upsert_settings(guild.id, showcase_text=text)
-
+        old = get_settings(guild.id)
         await interaction.response.defer(ephemeral=True)
+
+        text = str(self.showcase_text).replace("\\n", "\n")
+        updates = {"showcase_text": text}
+        warnings = []
+        for n, field in ((2, self.image2_url), (3, self.image3_url)):
+            url = str(field).strip()
+            old_url = (old[f"showcase_image{n}_url"] if old else None) or ""
+            old_blob = old[f"showcase_image{n}_blob"] if old else None
+            if not url:
+                updates.update({f"showcase_image{n}_url": "", f"showcase_image{n}_blob": b"", f"showcase_image{n}_name": ""})
+            elif url == old_url and old_blob:
+                continue  # unchanged, keep the saved copy
+            else:
+                got = await fetch_image_data(url)
+                if got:
+                    updates.update({f"showcase_image{n}_url": url, f"showcase_image{n}_blob": got[0], f"showcase_image{n}_name": got[1]})
+                else:
+                    warnings.append(f"Couldn't download image {n} - the link may be expired, private, or over 8 MB. Paste a fresh link. (Kept the old one.)")
+        upsert_settings(guild.id, **updates)
+
         files, links = await load_showcase_fixed(get_settings(guild.id))
         chunks = split_message(text + ("\n" + "\n".join(links) if links else ""))
 
-        await interaction.followup.send(
-            f"{CHECK} Showcase text saved! Preview below. Use `/showcase_images` to set the fixed image(s) that go under your photo.",
-            ephemeral=True,
-        )
-        for chunk in chunks[:-1]:
+        header = f"{CHECK} Showcase template saved! Preview:"
+        if warnings:
+            header += "\n" + "\n".join(warnings)
+        await interaction.followup.send(header, ephemeral=True)
+        for chunk in chunks:
             await interaction.followup.send(chunk, ephemeral=True)
-        await interaction.followup.send(chunks[-1], ephemeral=True)
         for f in files:
             await interaction.followup.send(file=f, ephemeral=True)
 
@@ -4350,45 +4374,19 @@ async def quickleaveban_clear(interaction: discord.Interaction):
 # Commands - Showcase
 # ------------------------------------------------------------
 
-@bot.tree.command(name="showcase_setup", description="Set the fixed showcase text")
+@bot.tree.command(name="showcase_setup", description="Set the fixed showcase text and the fixed image(s) under your photo")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def showcase_setup(interaction: discord.Interaction):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
-    prefill = {"showcase_text": settings["showcase_text"]} if settings else None
+    prefill = None
+    if settings:
+        prefill = {
+            "showcase_text": settings["showcase_text"],
+            "showcase_image2_url": settings["showcase_image2_url"],
+            "showcase_image3_url": settings["showcase_image3_url"],
+        }
     await interaction.response.send_modal(ShowcaseSetupModal(prefill=prefill))
-
-
-@bot.tree.command(name="showcase_images", description="Set the fixed image(s) that go under your photo in /showcase")
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(image2="1st fixed image / gif URL ('none' to remove)", image3="2nd fixed image / gif URL ('none' to remove)")
-async def showcase_images(interaction: discord.Interaction, image2: str | None = None, image3: str | None = None):
-    guild = guild_only(interaction)
-    if image2 is None and image3 is None:
-        await interaction.response.send_message("Give me at least one image URL (or 'none' to remove one).", ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=True)
-    updates = {}
-    for n, url in ((2, image2), (3, image3)):
-        if url is None:
-            continue
-        url = url.strip()
-        if url.lower() == "none":
-            updates.update({f"showcase_image{n}_url": "", f"showcase_image{n}_blob": b"", f"showcase_image{n}_name": ""})
-            continue
-        got = await fetch_image_data(url)
-        if not got:
-            await interaction.followup.send("Couldn't download that image - the link may be expired, private, or over 8 MB. Re-upload it and paste a fresh link. (Nothing was changed.)", ephemeral=True)
-            return
-        updates.update({f"showcase_image{n}_url": url, f"showcase_image{n}_blob": got[0], f"showcase_image{n}_name": got[1]})
-    upsert_settings(guild.id, **updates)
-
-    files, links = await load_showcase_fixed(get_settings(guild.id))
-    msg = f"{CHECK} Showcase images saved! Preview:" if (files or links) else f"{CHECK} Showcase images removed."
-    await interaction.followup.send(msg, ephemeral=True)
-    for f in files:
-        await interaction.followup.send(file=f, ephemeral=True)
 
 
 @bot.tree.command(name="showcase", description="Post a new showcase (in this channel/thread) with your saved template")
@@ -4422,7 +4420,7 @@ async def showcase_command(interaction: discord.Interaction, image: discord.Atta
 
     note = ""
     if links:
-        note = "\nSome fixed images were pasted as links because there's no saved copy. Re-save them with `/showcase_images` to attach them cleanly."
+        note = "\nSome fixed images were pasted as links because there's no saved copy. Re-save them in `/showcase_setup` with fresh links to attach them cleanly."
     await interaction.followup.send(f"{CHECK} Showcase posted to {channel.mention}!{note}", ephemeral=True)
 
 
