@@ -70,6 +70,7 @@ SETTINGS_COLUMNS = [
     "showcase_image2_blob", "showcase_image2_name", "showcase_image3_blob", "showcase_image3_name",
     "price_thumb_blob", "price_thumb_name", "price_image_blob", "price_image_name",
     "logo_banner_url", "logo_banner_blob", "logo_banner_name",
+    "logo_banner2_url", "logo_banner2_blob", "logo_banner2_name",
     "fastpass_role_ids",
     "switch_unpaid_category_id", "switch_paid_category_id",
     "switch_fp_category_id", "switch_priority_category_id",
@@ -4437,25 +4438,46 @@ LOGO_TOP_TEXT = (
 )
 
 
-@bot.tree.command(name="logoshowcase_setup", description="Set the fixed banner that /logoshowcase posts under the logo")
+@bot.tree.command(name="logoshowcase_setup", description="Set the fixed banner images that /logoshowcase posts under the logo")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(banner="Banner image / gif URL ('none' to remove)")
-async def logoshowcase_setup(interaction: discord.Interaction, banner: str):
+@app_commands.describe(banner="1st banner image / gif URL ('none' to remove)", banner2="2nd banner image / gif URL ('none' to remove)")
+async def logoshowcase_setup(interaction: discord.Interaction, banner: str | None = None, banner2: str | None = None):
     guild = guild_only(interaction)
-    banner = banner.strip()
+    if banner is None and banner2 is None:
+        await interaction.response.send_message("Give me at least one banner URL (or 'none' to remove one).", ephemeral=True)
+        return
+
     await interaction.response.defer(ephemeral=True)
+    updates = {}
+    for key, url in (("banner", banner), ("banner2", banner2)):
+        if url is None:
+            continue
+        url = url.strip()
+        if url.lower() == "none":
+            updates.update({f"logo_{key}_url": "", f"logo_{key}_blob": b"", f"logo_{key}_name": ""})
+            continue
+        got = await fetch_image_data(url)
+        if not got:
+            await interaction.followup.send("Couldn't download that image - the link may be expired, private, or over 8 MB. Re-upload it and paste a fresh link. (Nothing was changed.)", ephemeral=True)
+            return
+        updates.update({f"logo_{key}_url": url, f"logo_{key}_blob": got[0], f"logo_{key}_name": got[1]})
+    upsert_settings(guild.id, **updates)
 
-    if banner.lower() == "none":
-        upsert_settings(guild.id, logo_banner_url="", logo_banner_blob=b"", logo_banner_name="")
-        await interaction.followup.send(f"{CHECK} Logo banner removed.", ephemeral=True)
-        return
+    files = logo_banner_files(get_settings(guild.id))
+    await interaction.followup.send(f"{CHECK} Logo banners saved! Preview:" if files else f"{CHECK} Logo banners removed.", ephemeral=True)
+    for f in files:
+        await interaction.followup.send(file=f, ephemeral=True)
 
-    got = await fetch_image_data(banner)
-    if not got:
-        await interaction.followup.send("Couldn't download that image - the link may be expired, private, or over 8 MB. Re-upload it and paste a fresh link. (Nothing was changed.)", ephemeral=True)
-        return
-    upsert_settings(guild.id, logo_banner_url=banner, logo_banner_blob=got[0], logo_banner_name=got[1])
-    await interaction.followup.send(f"{CHECK} Logo banner saved! Preview:", file=stored_image_file(got[0], got[1]), ephemeral=True)
+
+def logo_banner_files(settings) -> list[discord.File]:
+    files = []
+    if settings:
+        for key in ("banner", "banner2"):
+            f = stored_image_file(settings[f"logo_{key}_blob"] or None, settings[f"logo_{key}_name"] or None)
+            if f:
+                f.filename = f"{len(files) + 1}_{f.filename}"
+                files.append(f)
+    return files
 
 
 @bot.tree.command(name="logoshowcase", description="Post a logo showcase with your saved banner under it")
@@ -4479,14 +4501,13 @@ async def logoshowcase_command(interaction: discord.Interaction, image: discord.
         await interaction.response.send_message("That's over Discord's 2000 character limit - shorten the charms.", ephemeral=True)
         return
 
-    settings = get_settings(guild.id)
-    banner = stored_image_file(settings["logo_banner_blob"] or None, settings["logo_banner_name"] or None) if settings else None
+    banners = logo_banner_files(get_settings(guild.id))
 
     await interaction.response.defer(ephemeral=True)
     await channel.send(text, files=[await image.to_file()])
-    if banner:
-        await channel.send(file=banner)
-    await interaction.followup.send(f"{CHECK} Logo showcase posted to {channel.mention}!" + ("" if banner else "\nNo banner set yet - use `/logoshowcase_setup`."), ephemeral=True)
+    for f in banners:
+        await channel.send(file=f)  # one per message so each shows full width under the logo
+    await interaction.followup.send(f"{CHECK} Logo showcase posted to {channel.mention}!" + ("" if banners else "\nNo banner set yet - use `/logoshowcase_setup`."), ephemeral=True)
 
 
 # ------------------------------------------------------------
