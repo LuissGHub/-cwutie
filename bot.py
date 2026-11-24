@@ -982,25 +982,58 @@ class RedeemTemplateModal(discord.ui.Modal, title="Redeem Message Template"):
         await interaction.response.send_message(msg, ephemeral=True)
 
 
+def split_message(text: str, limit: int = 2000) -> list[str]:
+    # plain messages cap at 2000 chars - split on line breaks, hard-split any single line that's too long
+    chunks, cur = [], ""
+    for line in text.split("\n"):
+        while len(line) > limit:
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        if cur and len(cur) + 1 + len(line) > limit:
+            chunks.append(cur)
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+async def load_showcase_fixed(urls: list[str | None], start_index: int = 1) -> tuple[list[discord.File], list[str]]:
+    # re-uploads the fixed images as attachments; anything that can't be downloaded falls back to its link
+    files: list[discord.File] = []
+    links: list[str] = []
+    for url in urls:
+        if not url:
+            continue
+        f = await fetch_image_file(url)
+        if f:
+            f.filename = f"{start_index + len(files)}_{f.filename}"
+            files.append(f)
+        else:
+            links.append(url)
+    return files, links
+
+
 class ShowcaseSetupModal(discord.ui.Modal, title="Showcase Template"):
     showcase_text = discord.ui.TextInput(
-        label="Fixed text (top embed description)",
+        label="Fixed text (goes above your photo)",
         style=discord.TextStyle.paragraph,
         required=True,
         max_length=4000,
         placeholder="The decorative header block - reused every showcase post",
     )
-    theme = discord.ui.TextInput(label="Color - theme name or hex", required=False, max_length=20, placeholder="pink / blue / mint / lavender / white / peach / #f7cfe3")
-    image2_url = discord.ui.TextInput(label="2nd embed image URL (fixed)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.gif")
-    image3_url = discord.ui.TextInput(label="3rd embed image URL (fixed, optional)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/xyz456.gif")
+    image2_url = discord.ui.TextInput(label="2nd image URL (fixed, optional)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.gif")
+    image3_url = discord.ui.TextInput(label="3rd image URL (fixed, optional)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/xyz456.gif")
 
     def __init__(self, prefill: dict | None = None):
         super().__init__()
         if prefill:
             if prefill.get("showcase_text"):
                 self.showcase_text.default = prefill["showcase_text"]
-            if prefill.get("showcase_theme"):
-                self.theme.default = prefill["showcase_theme"]
             if prefill.get("showcase_image2_url"):
                 self.image2_url.default = prefill["showcase_image2_url"]
             if prefill.get("showcase_image3_url"):
@@ -1010,23 +1043,26 @@ class ShowcaseSetupModal(discord.ui.Modal, title="Showcase Template"):
         guild = guild_only(interaction)
         kwargs = {
             "showcase_text": str(self.showcase_text).replace("\\n", "\n"),
-            "showcase_theme": str(self.theme).strip() or "pink",
             "showcase_image2_url": str(self.image2_url).strip(),
             "showcase_image3_url": str(self.image3_url).strip(),
         }
         upsert_settings(guild.id, **kwargs)
 
-        preview_embeds = [build_embed(title=None, description=kwargs["showcase_text"], theme=kwargs["showcase_theme"], image=None)]
-        if kwargs["showcase_image2_url"]:
-            preview_embeds.append(build_embed(title=None, description=None, theme=kwargs["showcase_theme"], image=kwargs["showcase_image2_url"]))
-        if kwargs["showcase_image3_url"]:
-            preview_embeds.append(build_embed(title=None, description=None, theme=kwargs["showcase_theme"], image=kwargs["showcase_image3_url"]))
+        await interaction.response.defer(ephemeral=True)
+        files, links = await load_showcase_fixed([kwargs["showcase_image2_url"], kwargs["showcase_image3_url"]], start_index=1)
+        content = kwargs["showcase_text"] + ("\n" + "\n".join(links) if links else "")
+        chunks = split_message(content)
 
-        await interaction.response.send_message(
-            f"{CHECK} Showcase template saved! When you run `/showcase`, this text/theme goes in the 1st embed alongside your photo, followed by the fixed image(s) below.",
-            embeds=preview_embeds,
+        await interaction.followup.send(
+            f"{CHECK} Showcase template saved! When you run `/showcase`, this text goes above your photo, followed by the fixed image(s). Preview:",
             ephemeral=True,
         )
+        for chunk in chunks[:-1]:
+            await interaction.followup.send(chunk, ephemeral=True)
+        if files:
+            await interaction.followup.send(chunks[-1], files=files, ephemeral=True)
+        else:
+            await interaction.followup.send(chunks[-1], ephemeral=True)
 
 
 # ------------------------------------------------------------
@@ -4329,7 +4365,6 @@ async def showcase_setup(interaction: discord.Interaction):
     if settings:
         prefill = {
             "showcase_text": settings["showcase_text"],
-            "showcase_theme": settings["showcase_theme"],
             "showcase_image2_url": settings["showcase_image2_url"],
             "showcase_image3_url": settings["showcase_image3_url"],
         }
@@ -4353,42 +4388,17 @@ async def showcase_command(interaction: discord.Interaction, image: discord.Atta
 
     await interaction.response.defer(ephemeral=True)
     files = [await image.to_file()]
-    extra_links = []
-    for key in ("showcase_image2_url", "showcase_image3_url"):
-        url = settings[key]
-        if not url:
-            continue
-        fixed = await fetch_image_file(url)
-        if fixed:
-            fixed.filename = f"{len(files)}_{fixed.filename}"
-            files.append(fixed)
-        else:
-            extra_links.append(url)  # couldn't re-upload it, so fall back to the link
+    fixed_files, extra_links = await load_showcase_fixed([settings["showcase_image2_url"], settings["showcase_image3_url"]], start_index=1)
+    files += fixed_files
 
     content = settings["showcase_text"]
     if extra_links:
         content += "\n" + "\n".join(extra_links)
 
-    # plain messages cap at 2000 chars - split on line breaks if the template is longer
-    chunks, cur = [], ""
-    for line in content.split("\n"):
-        while len(line) > 2000:
-            if cur:
-                chunks.append(cur)
-                cur = ""
-            chunks.append(line[:2000])
-            line = line[2000:]
-        if cur and len(cur) + 1 + len(line) > 2000:
-            chunks.append(cur)
-            cur = line
-        else:
-            cur = f"{cur}\n{line}" if cur else line
-    if cur:
-        chunks.append(cur)
-
+    chunks = split_message(content)
     for chunk in chunks[:-1]:
         await channel.send(chunk)
-    await channel.send(chunks[-1] if chunks else None, files=files)
+    await channel.send(chunks[-1], files=files)
     await interaction.followup.send(f"{CHECK} Showcase posted to {channel.mention}!", ephemeral=True)
 
 
