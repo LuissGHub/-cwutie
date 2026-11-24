@@ -4352,16 +4352,43 @@ async def showcase_command(interaction: discord.Interaction, image: discord.Atta
         return
 
     await interaction.response.defer(ephemeral=True)
-    file = await image.to_file()
-    theme = settings["showcase_theme"] or "pink"
+    files = [await image.to_file()]
+    extra_links = []
+    for key in ("showcase_image2_url", "showcase_image3_url"):
+        url = settings[key]
+        if not url:
+            continue
+        fixed = await fetch_image_file(url)
+        if fixed:
+            fixed.filename = f"{len(files)}_{fixed.filename}"
+            files.append(fixed)
+        else:
+            extra_links.append(url)  # couldn't re-upload it, so fall back to the link
 
-    embeds = [build_embed(title=None, description=settings["showcase_text"], theme=theme, image=f"attachment://{file.filename}")]
-    if settings["showcase_image2_url"]:
-        embeds.append(build_embed(title=None, description=None, theme=theme, image=settings["showcase_image2_url"]))
-    if settings["showcase_image3_url"]:
-        embeds.append(build_embed(title=None, description=None, theme=theme, image=settings["showcase_image3_url"]))
+    content = settings["showcase_text"]
+    if extra_links:
+        content += "\n" + "\n".join(extra_links)
 
-    await channel.send(embeds=embeds, file=file)
+    # plain messages cap at 2000 chars - split on line breaks if the template is longer
+    chunks, cur = [], ""
+    for line in content.split("\n"):
+        while len(line) > 2000:
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            chunks.append(line[:2000])
+            line = line[2000:]
+        if cur and len(cur) + 1 + len(line) > 2000:
+            chunks.append(cur)
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        chunks.append(cur)
+
+    for chunk in chunks[:-1]:
+        await channel.send(chunk)
+    await channel.send(chunks[-1] if chunks else None, files=files)
     await interaction.followup.send(f"{CHECK} Showcase posted to {channel.mention}!", ephemeral=True)
 
 
