@@ -69,6 +69,7 @@ SETTINGS_COLUMNS = [
     "showcase_channel_id", "showcase_text", "showcase_theme", "showcase_image2_url", "showcase_image3_url",
     "showcase_image2_blob", "showcase_image2_name", "showcase_image3_blob", "showcase_image3_name",
     "price_thumb_blob", "price_thumb_name", "price_image_blob", "price_image_name",
+    "logo_banner_url", "logo_banner_blob", "logo_banner_name",
     "fastpass_role_ids",
     "switch_unpaid_category_id", "switch_paid_category_id",
     "switch_fp_category_id", "switch_priority_category_id",
@@ -4390,8 +4391,8 @@ async def showcase_setup(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="showcase", description="Post a new showcase (in this channel/thread) with your saved template")
-@app_commands.describe(image="The commission photo to showcase", name="Model name - fills {name} in your template (e.g. locket v4)", made_by="Creator - fills {made_by} in your template (default: /cwutie DNS)")
-async def showcase_command(interaction: discord.Interaction, image: discord.Attachment, name: str, made_by: str = "/cwutie DNS"):
+@app_commands.describe(image="The commission photo to showcase", name="Model name - fills {name} in your template (e.g. locket v4)", made_by="Creator - fills {made_by} in your template (e.g. /cwutie DNS)")
+async def showcase_command(interaction: discord.Interaction, image: discord.Attachment, name: str, made_by: str):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
     if not settings or not settings["showcase_text"]:
@@ -4422,6 +4423,70 @@ async def showcase_command(interaction: discord.Interaction, image: discord.Atta
     if links:
         note = "\nSome fixed images were pasted as links because there's no saved copy. Re-save them in `/showcase_setup` with fresh links to attach them cleanly."
     await interaction.followup.send(f"{CHECK} Showcase posted to {channel.mention}!{note}", ephemeral=True)
+
+
+# ------------------------------------------------------------
+# Commands - Logo showcase
+# ------------------------------------------------------------
+
+LOGO_TOP_TEXT = (
+    "*<:001_DNS_ggcwutie:1521723633175888002> **DMCA** protected ꒰ঌ໒꒱*\n"
+    "*<a:1white_paws:1517064987678343198> **do not** copy, steal, or recreate ꒰ঌ໒꒱*\n"
+    "*<:001_DNS_ggcwutie:1521723633175888002> **do not** inspo off my art ꒰ঌ໒꒱*\n\n"
+    "*ʚ . ୨ **made by /cwutie** ˚ɞ  <:001_DNS_ggcradle:1521723847261294723>*"
+)
+
+
+@bot.tree.command(name="logoshowcase_setup", description="Set the fixed banner that /logoshowcase posts under the logo")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(banner="Banner image / gif URL ('none' to remove)")
+async def logoshowcase_setup(interaction: discord.Interaction, banner: str):
+    guild = guild_only(interaction)
+    banner = banner.strip()
+    await interaction.response.defer(ephemeral=True)
+
+    if banner.lower() == "none":
+        upsert_settings(guild.id, logo_banner_url="", logo_banner_blob=b"", logo_banner_name="")
+        await interaction.followup.send(f"{CHECK} Logo banner removed.", ephemeral=True)
+        return
+
+    got = await fetch_image_data(banner)
+    if not got:
+        await interaction.followup.send("Couldn't download that image - the link may be expired, private, or over 8 MB. Re-upload it and paste a fresh link. (Nothing was changed.)", ephemeral=True)
+        return
+    upsert_settings(guild.id, logo_banner_url=banner, logo_banner_blob=got[0], logo_banner_name=got[1])
+    await interaction.followup.send(f"{CHECK} Logo banner saved! Preview:", file=stored_image_file(got[0], got[1]), ephemeral=True)
+
+
+@bot.tree.command(name="logoshowcase", description="Post a logo showcase with your saved banner under it")
+@app_commands.describe(image="The logo to showcase", assets="Show the assets line?", charms="Charms (e.g. /pom) - leave empty to skip the charms line")
+@app_commands.choices(assets=[app_commands.Choice(name="yes", value="yes"), app_commands.Choice(name="no", value="no")])
+async def logoshowcase_command(interaction: discord.Interaction, image: discord.Attachment, assets: str = "no", charms: str | None = None):
+    guild = guild_only(interaction)
+    channel = interaction.channel
+
+    if not image.content_type or not image.content_type.startswith("image/"):
+        await interaction.response.send_message("Please attach an image file.", ephemeral=True)
+        return
+
+    sub = []
+    if charms and charms.strip():
+        sub.append(f"-# ***ʚ<:001_DNS_ggcwutie:1521723633175888002>ɞ charms {charms.strip()}***")
+    if assets == "yes":
+        sub.append("-# *<a:sparkly:1563578849994874992> assets /tiaras*")
+    text = LOGO_TOP_TEXT + ("\n" + "\n".join(sub) if sub else "") + f"\n\n{PAYMENT_DIVIDER}"
+    if len(text) > 2000:
+        await interaction.response.send_message("That's over Discord's 2000 character limit - shorten the charms.", ephemeral=True)
+        return
+
+    settings = get_settings(guild.id)
+    banner = stored_image_file(settings["logo_banner_blob"] or None, settings["logo_banner_name"] or None) if settings else None
+
+    await interaction.response.defer(ephemeral=True)
+    await channel.send(text, files=[await image.to_file()])
+    if banner:
+        await channel.send(file=banner)
+    await interaction.followup.send(f"{CHECK} Logo showcase posted to {channel.mention}!" + ("" if banner else "\nNo banner set yet - use `/logoshowcase_setup`."), ephemeral=True)
 
 
 # ------------------------------------------------------------
