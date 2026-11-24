@@ -597,16 +597,6 @@ def stored_image_file(blob: bytes | None, name: str | None) -> discord.File | No
     return discord.File(io.BytesIO(blob), filename=name or "image.png")
 
 
-async def read_image_attachment(att: discord.Attachment) -> tuple[bytes, str] | None:
-    if not att.content_type or not att.content_type.startswith("image/") or att.size > PLAIN_IMAGE_MAX_BYTES:
-        return None
-    try:
-        data = await att.read()
-    except discord.HTTPException:
-        return None
-    return data, re.sub(r"[^A-Za-z0-9._-]", "_", att.filename) or "image.png"
-
-
 # ------------------------------------------------------------
 # Image Responder Helpers
 # ------------------------------------------------------------
@@ -4370,35 +4360,33 @@ async def showcase_setup(interaction: discord.Interaction):
     await interaction.response.send_modal(ShowcaseSetupModal(prefill=prefill))
 
 
-@bot.tree.command(name="showcase_images", description="Upload the fixed image(s) that go under your photo in /showcase")
+@bot.tree.command(name="showcase_images", description="Set the fixed image(s) that go under your photo in /showcase")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(image2="1st fixed image (uploaded here, so it never expires)", image3="2nd fixed image (optional)", clear="Remove both fixed images")
-async def showcase_images(interaction: discord.Interaction, image2: discord.Attachment | None = None, image3: discord.Attachment | None = None, clear: bool = False):
+@app_commands.describe(image2="1st fixed image / gif URL ('none' to remove)", image3="2nd fixed image / gif URL ('none' to remove)")
+async def showcase_images(interaction: discord.Interaction, image2: str | None = None, image3: str | None = None):
     guild = guild_only(interaction)
-    if not (image2 or image3 or clear):
-        await interaction.response.send_message("Attach at least one image (or set clear to true).", ephemeral=True)
+    if image2 is None and image3 is None:
+        await interaction.response.send_message("Give me at least one image URL (or 'none' to remove one).", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True)
     updates = {}
-    notes = []
-    if clear:
-        for n in (2, 3):
+    for n, url in ((2, image2), (3, image3)):
+        if url is None:
+            continue
+        url = url.strip()
+        if url.lower() == "none":
             updates.update({f"showcase_image{n}_url": "", f"showcase_image{n}_blob": b"", f"showcase_image{n}_name": ""})
-        notes.append("Cleared the fixed images.")
-    for n, att in ((2, image2), (3, image3)):
-        if att is None:
             continue
-        got = await read_image_attachment(att)
+        got = await fetch_image_data(url)
         if not got:
-            notes.append(f"Image {n} wasn't an image or is over 8 MB - skipped.")
-            continue
-        updates.update({f"showcase_image{n}_url": "", f"showcase_image{n}_blob": got[0], f"showcase_image{n}_name": got[1]})
-        notes.append(f"Saved image {n}.")
+            await interaction.followup.send("Couldn't download that image - the link may be expired, private, or over 8 MB. Re-upload it and paste a fresh link. (Nothing was changed.)", ephemeral=True)
+            return
+        updates.update({f"showcase_image{n}_url": url, f"showcase_image{n}_blob": got[0], f"showcase_image{n}_name": got[1]})
     upsert_settings(guild.id, **updates)
 
     files, links = await load_showcase_fixed(get_settings(guild.id))
-    msg = f"{CHECK} " + " ".join(notes) + " Preview:"
+    msg = f"{CHECK} Showcase images saved! Preview:" if (files or links) else f"{CHECK} Showcase images removed."
     if files:
         await interaction.followup.send(msg, files=files, ephemeral=True)
     else:
@@ -4478,33 +4466,33 @@ BODY_CHANGE_PRICE = (1, 100)
 EXTRA_COPY_PRICE = (1, 100)   # per copy
 
 
-@bot.tree.command(name="price_images", description="Set the small top-right image and bottom image shown on /price")
+@bot.tree.command(name="price_setup", description="Set the small top-right image and bottom image shown on /price")
 @app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(top_right="Small image shown in the top right corner", bottom="Image shown at the bottom", clear="Remove both images")
-async def price_images(interaction: discord.Interaction, top_right: discord.Attachment | None = None, bottom: discord.Attachment | None = None, clear: bool = False):
+@app_commands.describe(top_right="Small image / gif URL for the top right corner ('none' to remove)", bottom="Image / gif URL for the bottom ('none' to remove)")
+async def price_setup(interaction: discord.Interaction, top_right: str | None = None, bottom: str | None = None):
     guild = guild_only(interaction)
-    if not (top_right or bottom or clear):
-        await interaction.response.send_message("Attach at least one image (or set clear to true).", ephemeral=True)
+    if top_right is None and bottom is None:
+        await interaction.response.send_message("Give me at least one image URL (or 'none' to remove one).", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True)
     updates = {}
-    notes = []
-    if clear:
-        updates.update(price_thumb_blob=b"", price_thumb_name="", price_image_blob=b"", price_image_name="")
-        notes.append("Cleared the price images.")
-    for key, att, label in (("thumb", top_right, "top right"), ("image", bottom, "bottom")):
-        if att is None:
+    for key, url in (("thumb", top_right), ("image", bottom)):
+        if url is None:
             continue
-        got = await read_image_attachment(att)
+        url = url.strip()
+        if url.lower() == "none":
+            updates[f"price_{key}_blob"] = b""
+            updates[f"price_{key}_name"] = ""
+            continue
+        got = await fetch_image_data(url)
         if not got:
-            notes.append(f"The {label} image wasn't an image or is over 8 MB - skipped.")
-            continue
+            await interaction.followup.send("Couldn't download that image - the link may be expired, private, or over 8 MB. Re-upload it and paste a fresh link. (Nothing was changed.)", ephemeral=True)
+            return
         updates[f"price_{key}_blob"] = got[0]
         updates[f"price_{key}_name"] = got[1]
-        notes.append(f"Saved the {label} image.")
     upsert_settings(guild.id, **updates)
-    await interaction.followup.send(f"{CHECK} " + " ".join(notes) + " Run `/price` to see it.", ephemeral=True)
+    await interaction.followup.send(f"{CHECK} Price images saved! Run `/price` to see them.", ephemeral=True)
 
 
 @bot.tree.command(name="price", description="Show the price in $ and Robux for an item, upload option, and add-ons")
