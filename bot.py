@@ -1054,10 +1054,9 @@ class ShowcaseSetupModal(discord.ui.Modal, title="Showcase Template"):
         )
         for chunk in chunks[:-1]:
             await interaction.followup.send(chunk, ephemeral=True)
-        if files:
-            await interaction.followup.send(chunks[-1], files=files, ephemeral=True)
-        else:
-            await interaction.followup.send(chunks[-1], ephemeral=True)
+        await interaction.followup.send(chunks[-1], ephemeral=True)
+        for f in files:
+            await interaction.followup.send(file=f, ephemeral=True)
 
 
 # ------------------------------------------------------------
@@ -4387,10 +4386,9 @@ async def showcase_images(interaction: discord.Interaction, image2: str | None =
 
     files, links = await load_showcase_fixed(get_settings(guild.id))
     msg = f"{CHECK} Showcase images saved! Preview:" if (files or links) else f"{CHECK} Showcase images removed."
-    if files:
-        await interaction.followup.send(msg, files=files, ephemeral=True)
-    else:
-        await interaction.followup.send(msg, ephemeral=True)
+    await interaction.followup.send(msg, ephemeral=True)
+    for f in files:
+        await interaction.followup.send(file=f, ephemeral=True)
 
 
 @bot.tree.command(name="showcase", description="Post a new showcase (in this channel/thread) with your saved template")
@@ -4411,7 +4409,6 @@ async def showcase_command(interaction: discord.Interaction, image: discord.Atta
     await interaction.response.defer(ephemeral=True)
     files = [await image.to_file()]
     fixed_files, links = await load_showcase_fixed(settings)
-    files += fixed_files
 
     content = settings["showcase_text"]
     if links:
@@ -4420,10 +4417,12 @@ async def showcase_command(interaction: discord.Interaction, image: discord.Atta
     for chunk in chunks[:-1]:
         await channel.send(chunk)
     await channel.send(chunks[-1], files=files)
+    for f in fixed_files:
+        await channel.send(file=f)
 
     note = ""
     if links:
-        note = "\nSome fixed images were pasted as links because there's no saved copy. Re-save them in `/showcase_setup` with fresh links to attach them cleanly."
+        note = "\nSome fixed images were pasted as links because there's no saved copy. Re-save them with `/showcase_images` to attach them cleanly."
     await interaction.followup.send(f"{CHECK} Showcase posted to {channel.mention}!{note}", ephemeral=True)
 
 
