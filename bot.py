@@ -1003,10 +1003,10 @@ def split_message(text: str, limit: int = 2000) -> list[str]:
     return chunks
 
 
-async def load_showcase_fixed(settings) -> tuple[list[discord.File], list[int]]:
-    # fixed images come from the copy saved at setup (links expire); old setups fall back to downloading the link
+async def load_showcase_fixed(settings) -> tuple[list[discord.File], list[str]]:
+    # fixed images come from the copy saved at setup; if there's no usable copy the saved link is pasted as text instead
     files: list[discord.File] = []
-    missing: list[int] = []
+    links: list[str] = []
     for n in (2, 3):
         url = settings[f"showcase_image{n}_url"]
         blob = settings[f"showcase_image{n}_blob"]
@@ -1017,11 +1017,11 @@ async def load_showcase_fixed(settings) -> tuple[list[discord.File], list[int]]:
         if f is None and url:
             f = await fetch_image_file(url)
         if f is None:
-            missing.append(n)
+            links.append(url)
             continue
         f.filename = f"{len(files) + 1}_{f.filename}"
         files.append(f)
-    return files, missing
+    return files, links
 
 
 class ShowcaseSetupModal(discord.ui.Modal, title="Showcase Template"):
@@ -1068,8 +1068,8 @@ class ShowcaseSetupModal(discord.ui.Modal, title="Showcase Template"):
                     warnings.append(f"Couldn't download image {n} - the link may be expired, private, or over 8 MB. Paste a fresh link. (Kept the old one.)")
         upsert_settings(guild.id, **updates)
 
-        files, _missing = await load_showcase_fixed(get_settings(guild.id))
-        chunks = split_message(updates["showcase_text"])
+        files, links = await load_showcase_fixed(get_settings(guild.id))
+        chunks = split_message(updates["showcase_text"] + ("\n" + "\n".join(links) if links else ""))
 
         header = f"{CHECK} Showcase template saved! When you run `/showcase`, this text goes above your photo, followed by the fixed image(s). Preview:"
         if warnings:
@@ -1655,8 +1655,8 @@ PAYMENT_PP_TEXT = (
 
 
 class PaymentButton(discord.ui.Button):
-    def __init__(self, emoji: str, custom_id: str, text: str):
-        super().__init__(emoji=emoji, style=discord.ButtonStyle.secondary, custom_id=custom_id)
+    def __init__(self, emoji: str, label: str, custom_id: str, text: str):
+        super().__init__(emoji=emoji, label=label, style=discord.ButtonStyle.secondary, custom_id=custom_id)
         self.text = text
 
     async def callback(self, interaction: discord.Interaction):
@@ -1673,9 +1673,9 @@ class PaymentView(discord.ui.View):
     # persistent (timeout=None + fixed custom_ids), so the buttons keep working after a bot restart
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(PaymentButton("<:001DNSggcwutierbx:1574519900100366427>", "pay_rbx", PAYMENT_RBX_TEXT))
-        self.add_item(PaymentButton("<:001DNSggcwutieca:1574519553201807391>", "pay_ca", PAYMENT_CA_TEXT))
-        self.add_item(PaymentButton("<:001DNSggcwutiepp:1574519932505423953>", "pay_pp", PAYMENT_PP_TEXT))
+        self.add_item(PaymentButton("<:001DNSggcwutierbx:1574519900100366427>", "robux", "pay_rbx", PAYMENT_RBX_TEXT))
+        self.add_item(PaymentButton("<:001DNSggcwutieca:1574519553201807391>", "cash app", "pay_ca", PAYMENT_CA_TEXT))
+        self.add_item(PaymentButton("<:001DNSggcwutiepp:1574519932505423953>", "paypal", "pay_pp", PAYMENT_PP_TEXT))
 
 
 # ------------------------------------------------------------
@@ -4406,17 +4406,20 @@ async def showcase_command(interaction: discord.Interaction, image: discord.Atta
 
     await interaction.response.defer(ephemeral=True)
     files = [await image.to_file()]
-    fixed_files, missing = await load_showcase_fixed(settings)
+    fixed_files, links = await load_showcase_fixed(settings)
     files += fixed_files
 
-    chunks = split_message(settings["showcase_text"])
+    content = settings["showcase_text"]
+    if links:
+        content += "\n" + "\n".join(links)
+    chunks = split_message(content)
     for chunk in chunks[:-1]:
         await channel.send(chunk)
     await channel.send(chunks[-1], files=files)
 
     note = ""
-    if missing:
-        note = f"\nCouldn't load fixed image {' and '.join(str(n) for n in missing)} - re-save it with `/showcase_setup` using a fresh link."
+    if links:
+        note = "\nSome fixed images were pasted as links because there's no saved copy. Re-save them in `/showcase_setup` with fresh links to attach them cleanly."
     await interaction.followup.send(f"{CHECK} Showcase posted to {channel.mention}!{note}", ephemeral=True)
 
 
