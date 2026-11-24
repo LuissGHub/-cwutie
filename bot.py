@@ -1027,7 +1027,7 @@ async def load_showcase_fixed(settings) -> tuple[list[discord.File], list[str]]:
 
 class ShowcaseSetupModal(discord.ui.Modal, title="Showcase Template"):
     showcase_text = discord.ui.TextInput(
-        label="Fixed text (goes above your photo)",
+        label="Text - use {name} and {made_by}",
         style=discord.TextStyle.paragraph,
         required=True,
         max_length=4000,
@@ -3960,28 +3960,6 @@ async def self_command(interaction: discord.Interaction, roblox_user: str, roblo
     await interaction.response.send_message(text, allowed_mentions=FORM_MENTIONS)
 
 
-PREVIEW_TEXT = """*ʚ . ୨ **{name}** ˚ɞ  <:001_DNS_ggcradle:1521723847261294723>*
-
-*<:001_DNS_ggcwutie:1521723686187565078> made by {made_by}*
-
-*<:001_DNS_ggcwutie:1521723633175888002> **DMCA** protected ꒰ঌ໒꒱*
-*<a:1white_paws:1517064987678343198> **do not** copy, steal, or recreate ꒰ঌ໒꒱*
-*<:001_DNS_ggcwutie:1521723633175888002> you may ask for this model to be used in your ugc ꒰ঌ໒꒱*
-
-✿﹒ . ๑ ︵ <:001_DNS_ggcradle:1521723847261294723> ︵ ๑ . ﹒✿"""
-
-
-@bot.tree.command(name="preview", description="Post the preview/DMCA message with the model name and creator filled in")
-@app_commands.describe(name="Model name (e.g. locket v4)", made_by="Who made it (default: /cwutie DNS)")
-async def preview_command(interaction: discord.Interaction, name: str, made_by: str = "/cwutie DNS"):
-    guild_only(interaction)
-    text = fill_form(PREVIEW_TEXT, name=name, made_by=made_by)
-    if len(text) > 2000:
-        await interaction.response.send_message("That's over Discord's 2000 character limit - shorten an answer.", ephemeral=True)
-        return
-    await interaction.response.send_message(text, allowed_mentions=FORM_MENTIONS)
-
-
 # ------------------------------------------------------------
 # Commands - Moderation (ban)
 # ------------------------------------------------------------
@@ -4412,8 +4390,8 @@ async def showcase_setup(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="showcase", description="Post a new showcase (in this channel/thread) with your saved template")
-@app_commands.describe(image="The commission photo to showcase")
-async def showcase_command(interaction: discord.Interaction, image: discord.Attachment):
+@app_commands.describe(image="The commission photo to showcase", name="Model name - fills {name} in your template (e.g. locket v4)", made_by="Creator - fills {made_by} in your template (default: /cwutie DNS)")
+async def showcase_command(interaction: discord.Interaction, image: discord.Attachment, name: str, made_by: str = "/cwutie DNS"):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
     if not settings or not settings["showcase_text"]:
@@ -4430,7 +4408,7 @@ async def showcase_command(interaction: discord.Interaction, image: discord.Atta
     files = [await image.to_file()]
     fixed_files, links = await load_showcase_fixed(settings)
 
-    content = settings["showcase_text"]
+    content = settings["showcase_text"].replace("{name}", name.strip()).replace("{made_by}", made_by.strip())
     if links:
         content += "\n" + "\n".join(links)
     chunks = split_message(content)
