@@ -4514,7 +4514,8 @@ roblox_group = app_commands.Group(name="roblox", description="Roblox utilities")
 @app_commands.describe(amount="Robux amount", discount="Apply 10% discount")
 async def roblox_calctax(interaction: discord.Interaction, amount: int, discount: bool = False):
     display_amount = round(amount * 0.90) if discount else amount
-    after_tax = round(display_amount * 0.70)
+    # "after tax" here = what you have to send so they receive the full amount after Roblox's 30% cut
+    after_tax = round(display_amount / 0.70)
     bullet = "<:001_DNS_ggcwutie:1521723686187565078>"
 
     lines = [f"*{bullet} **before tax:** {amount} {ROBUX_EMOJI}*"]
