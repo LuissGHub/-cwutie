@@ -68,6 +68,7 @@ SETTINGS_COLUMNS = [
     "ticket_category_id", "ticket_name_prefix", "ticket_ignore_user_ids",
     "showcase_channel_id", "showcase_text", "showcase_theme", "showcase_image2_url", "showcase_image3_url",
     "showcase_image2_blob", "showcase_image2_name", "showcase_image3_blob", "showcase_image3_name",
+    "price_thumb_blob", "price_thumb_name", "price_image_blob", "price_image_name",
     "fastpass_role_ids",
     "switch_unpaid_category_id", "switch_paid_category_id",
     "switch_fp_category_id", "switch_priority_category_id",
@@ -596,6 +597,16 @@ def stored_image_file(blob: bytes | None, name: str | None) -> discord.File | No
     return discord.File(io.BytesIO(blob), filename=name or "image.png")
 
 
+async def read_image_attachment(att: discord.Attachment) -> tuple[bytes, str] | None:
+    if not att.content_type or not att.content_type.startswith("image/") or att.size > PLAIN_IMAGE_MAX_BYTES:
+        return None
+    try:
+        data = await att.read()
+    except discord.HTTPException:
+        return None
+    return data, re.sub(r"[^A-Za-z0-9._-]", "_", att.filename) or "image.png"
+
+
 # ------------------------------------------------------------
 # Image Responder Helpers
 # ------------------------------------------------------------
@@ -1032,49 +1043,25 @@ class ShowcaseSetupModal(discord.ui.Modal, title="Showcase Template"):
         max_length=4000,
         placeholder="The decorative header block - reused every showcase post",
     )
-    image2_url = discord.ui.TextInput(label="2nd image URL (fixed, optional)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/abc123.gif")
-    image3_url = discord.ui.TextInput(label="3rd image URL (fixed, optional)", required=False, max_length=1000, placeholder="e.g.  https://i.imgur.com/xyz456.gif")
 
     def __init__(self, prefill: dict | None = None):
         super().__init__()
-        if prefill:
-            if prefill.get("showcase_text"):
-                self.showcase_text.default = prefill["showcase_text"]
-            if prefill.get("showcase_image2_url"):
-                self.image2_url.default = prefill["showcase_image2_url"]
-            if prefill.get("showcase_image3_url"):
-                self.image3_url.default = prefill["showcase_image3_url"]
+        if prefill and prefill.get("showcase_text"):
+            self.showcase_text.default = prefill["showcase_text"]
 
     async def on_submit(self, interaction: discord.Interaction):
         guild = guild_only(interaction)
-        old = get_settings(guild.id)
+        text = str(self.showcase_text).replace("\\n", "\n")
+        upsert_settings(guild.id, showcase_text=text)
+
         await interaction.response.defer(ephemeral=True)
-
-        updates = {"showcase_text": str(self.showcase_text).replace("\\n", "\n")}
-        warnings = []
-        for n, field in ((2, self.image2_url), (3, self.image3_url)):
-            url = str(field).strip()
-            old_url = (old[f"showcase_image{n}_url"] if old else None) or ""
-            old_blob = old[f"showcase_image{n}_blob"] if old else None
-            if not url:
-                updates.update({f"showcase_image{n}_url": "", f"showcase_image{n}_blob": b"", f"showcase_image{n}_name": ""})
-            elif url == old_url and old_blob:
-                continue  # unchanged, keep the saved copy
-            else:
-                got = await fetch_image_data(url)
-                if got:
-                    updates.update({f"showcase_image{n}_url": url, f"showcase_image{n}_blob": got[0], f"showcase_image{n}_name": got[1]})
-                else:
-                    warnings.append(f"Couldn't download image {n} - the link may be expired, private, or over 8 MB. Paste a fresh link. (Kept the old one.)")
-        upsert_settings(guild.id, **updates)
-
         files, links = await load_showcase_fixed(get_settings(guild.id))
-        chunks = split_message(updates["showcase_text"] + ("\n" + "\n".join(links) if links else ""))
+        chunks = split_message(text + ("\n" + "\n".join(links) if links else ""))
 
-        header = f"{CHECK} Showcase template saved! When you run `/showcase`, this text goes above your photo, followed by the fixed image(s). Preview:"
-        if warnings:
-            header += "\n" + "\n".join(warnings)
-        await interaction.followup.send(header, ephemeral=True)
+        await interaction.followup.send(
+            f"{CHECK} Showcase text saved! Preview below. Use `/showcase_images` to set the fixed image(s) that go under your photo.",
+            ephemeral=True,
+        )
         for chunk in chunks[:-1]:
             await interaction.followup.send(chunk, ephemeral=True)
         if files:
@@ -4374,19 +4361,48 @@ async def quickleaveban_clear(interaction: discord.Interaction):
 # Commands - Showcase
 # ------------------------------------------------------------
 
-@bot.tree.command(name="showcase_setup", description="Set the fixed showcase template (text + the 2nd/3rd banner images)")
+@bot.tree.command(name="showcase_setup", description="Set the fixed showcase text")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def showcase_setup(interaction: discord.Interaction):
     guild = guild_only(interaction)
     settings = get_settings(guild.id)
-    prefill = None
-    if settings:
-        prefill = {
-            "showcase_text": settings["showcase_text"],
-            "showcase_image2_url": settings["showcase_image2_url"],
-            "showcase_image3_url": settings["showcase_image3_url"],
-        }
+    prefill = {"showcase_text": settings["showcase_text"]} if settings else None
     await interaction.response.send_modal(ShowcaseSetupModal(prefill=prefill))
+
+
+@bot.tree.command(name="showcase_images", description="Upload the fixed image(s) that go under your photo in /showcase")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(image2="1st fixed image (uploaded here, so it never expires)", image3="2nd fixed image (optional)", clear="Remove both fixed images")
+async def showcase_images(interaction: discord.Interaction, image2: discord.Attachment | None = None, image3: discord.Attachment | None = None, clear: bool = False):
+    guild = guild_only(interaction)
+    if not (image2 or image3 or clear):
+        await interaction.response.send_message("Attach at least one image (or set clear to true).", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    updates = {}
+    notes = []
+    if clear:
+        for n in (2, 3):
+            updates.update({f"showcase_image{n}_url": "", f"showcase_image{n}_blob": b"", f"showcase_image{n}_name": ""})
+        notes.append("Cleared the fixed images.")
+    for n, att in ((2, image2), (3, image3)):
+        if att is None:
+            continue
+        got = await read_image_attachment(att)
+        if not got:
+            notes.append(f"Image {n} wasn't an image or is over 8 MB - skipped.")
+            continue
+        updates.update({f"showcase_image{n}_url": "", f"showcase_image{n}_blob": got[0], f"showcase_image{n}_name": got[1]})
+        notes.append(f"Saved image {n}.")
+    upsert_settings(guild.id, **updates)
+
+    files, links = await load_showcase_fixed(get_settings(guild.id))
+    msg = f"{CHECK} " + " ".join(notes) + " Preview:"
+    if files:
+        await interaction.followup.send(msg, files=files, ephemeral=True)
+    else:
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 @bot.tree.command(name="showcase", description="Post a new showcase (in this channel/thread) with your saved template")
@@ -4460,6 +4476,35 @@ CUSTOM_CHARM_PRICE = (2, 250)   # (usd, robux), flat
 TEXT_DESIGN_PRICE = (3, 350)    # (usd, robux), flat
 BODY_CHANGE_PRICE = (1, 100)
 EXTRA_COPY_PRICE = (1, 100)   # per copy
+
+
+@bot.tree.command(name="price_images", description="Set the small top-right image and bottom image shown on /price")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(top_right="Small image shown in the top right corner", bottom="Image shown at the bottom", clear="Remove both images")
+async def price_images(interaction: discord.Interaction, top_right: discord.Attachment | None = None, bottom: discord.Attachment | None = None, clear: bool = False):
+    guild = guild_only(interaction)
+    if not (top_right or bottom or clear):
+        await interaction.response.send_message("Attach at least one image (or set clear to true).", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    updates = {}
+    notes = []
+    if clear:
+        updates.update(price_thumb_blob=b"", price_thumb_name="", price_image_blob=b"", price_image_name="")
+        notes.append("Cleared the price images.")
+    for key, att, label in (("thumb", top_right, "top right"), ("image", bottom, "bottom")):
+        if att is None:
+            continue
+        got = await read_image_attachment(att)
+        if not got:
+            notes.append(f"The {label} image wasn't an image or is over 8 MB - skipped.")
+            continue
+        updates[f"price_{key}_blob"] = got[0]
+        updates[f"price_{key}_name"] = got[1]
+        notes.append(f"Saved the {label} image.")
+    upsert_settings(guild.id, **updates)
+    await interaction.followup.send(f"{CHECK} " + " ".join(notes) + " Run `/price` to see it.", ephemeral=True)
 
 
 @bot.tree.command(name="price", description="Show the price in $ and Robux for an item, upload option, and add-ons")
@@ -4559,7 +4604,23 @@ async def price_command(
     description = PRICE_HEADER + "\n\n" + "\n\n".join(lines) + "\n\n" + PAYMENT_PROMPT_TEXT
 
     embed = discord.Embed(description=description, color=get_theme_color("pink"))
-    await interaction.response.send_message(embed=embed, view=PaymentView())
+
+    files = []
+    pset = get_settings(interaction.guild_id) if interaction.guild_id else None
+    if pset:
+        thumb = stored_image_file(pset["price_thumb_blob"] or None, "thumb_" + (pset["price_thumb_name"] or "image.png"))
+        bottom_img = stored_image_file(pset["price_image_blob"] or None, "bottom_" + (pset["price_image_name"] or "image.png"))
+        if thumb:
+            embed.set_thumbnail(url=f"attachment://{thumb.filename}")
+            files.append(thumb)
+        if bottom_img:
+            embed.set_image(url=f"attachment://{bottom_img.filename}")
+            files.append(bottom_img)
+
+    if files:
+        await interaction.response.send_message(embed=embed, view=PaymentView(), files=files)
+    else:
+        await interaction.response.send_message(embed=embed, view=PaymentView())
 
 
 # ------------------------------------------------------------
