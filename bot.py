@@ -4515,19 +4515,19 @@ roblox_group = app_commands.Group(name="roblox", description="Roblox utilities")
 async def roblox_calctax(interaction: discord.Interaction, amount: int, discount: bool = False):
     display_amount = round(amount * 0.90) if discount else amount
     after_tax = round(display_amount * 0.70)
-    to_cover_tax = round(display_amount / 0.70)
+    bullet = "<:001_DNS_ggcwutie:1521723686187565078>"
 
-    embed = discord.Embed(color=get_theme_color("pink"))
+    lines = [f"*{bullet} **before tax:** {amount} {ROBUX_EMOJI}*"]
     if discount:
-        embed.add_field(name="Original amount", value=f"{amount} <:001_roblox_DNS:1501267296511856712>", inline=False)
-        embed.add_field(name="After 10% discount", value=f"{display_amount} <:001_roblox_DNS:1501267296511856712>", inline=False)
-    else:
-        embed.add_field(name="Initial amount", value=f"{amount} <:001_roblox_DNS:1501267296511856712>", inline=False)
+        lines.append(f"*{bullet} **after 10% discount:** {display_amount} {ROBUX_EMOJI}*")
+    lines.append(f"*{bullet} **after tax:** {after_tax} {ROBUX_EMOJI}*")
 
-    embed.add_field(name="After Roblox tax (30%)", value=f"{after_tax} <:001_roblox_DNS:1501267296511856712>", inline=False)
-    embed.add_field(name="Total cost to cover tax", value=f"{to_cover_tax} <:001_roblox_DNS:1501267296511856712>", inline=False)
-
-    await interaction.response.send_message(embed=embed)
+    text = (
+        "***ʚ . ୨ rbx tax ˚ɞ ** <:001_DNS_ggcradle:1521723847261294723>*\n\n"
+        + "\n".join(lines)
+        + f"\n\n{PAYMENT_DIVIDER}"
+    )
+    await interaction.response.send_message(text)
 
 
 bot.tree.add_command(roblox_group)
