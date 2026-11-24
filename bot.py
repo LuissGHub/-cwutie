@@ -67,6 +67,7 @@ SETTINGS_COLUMNS = [
     "vouch_count_enabled",
     "ticket_category_id", "ticket_name_prefix", "ticket_ignore_user_ids",
     "showcase_channel_id", "showcase_text", "showcase_theme", "showcase_image2_url", "showcase_image3_url",
+    "showcase_image2_blob", "showcase_image2_name", "showcase_image3_blob", "showcase_image3_name",
     "fastpass_role_ids",
     "switch_unpaid_category_id", "switch_paid_category_id",
     "switch_fp_category_id", "switch_priority_category_id",
@@ -1002,20 +1003,25 @@ def split_message(text: str, limit: int = 2000) -> list[str]:
     return chunks
 
 
-async def load_showcase_fixed(urls: list[str | None], start_index: int = 1) -> tuple[list[discord.File], list[str]]:
-    # re-uploads the fixed images as attachments; anything that can't be downloaded falls back to its link
+async def load_showcase_fixed(settings) -> tuple[list[discord.File], list[int]]:
+    # fixed images come from the copy saved at setup (links expire); old setups fall back to downloading the link
     files: list[discord.File] = []
-    links: list[str] = []
-    for url in urls:
-        if not url:
+    missing: list[int] = []
+    for n in (2, 3):
+        url = settings[f"showcase_image{n}_url"]
+        blob = settings[f"showcase_image{n}_blob"]
+        name = settings[f"showcase_image{n}_name"]
+        if not url and not blob:
             continue
-        f = await fetch_image_file(url)
-        if f:
-            f.filename = f"{start_index + len(files)}_{f.filename}"
-            files.append(f)
-        else:
-            links.append(url)
-    return files, links
+        f = stored_image_file(blob or None, name or None)
+        if f is None and url:
+            f = await fetch_image_file(url)
+        if f is None:
+            missing.append(n)
+            continue
+        f.filename = f"{len(files) + 1}_{f.filename}"
+        files.append(f)
+    return files, missing
 
 
 class ShowcaseSetupModal(discord.ui.Modal, title="Showcase Template"):
@@ -1041,22 +1047,34 @@ class ShowcaseSetupModal(discord.ui.Modal, title="Showcase Template"):
 
     async def on_submit(self, interaction: discord.Interaction):
         guild = guild_only(interaction)
-        kwargs = {
-            "showcase_text": str(self.showcase_text).replace("\\n", "\n"),
-            "showcase_image2_url": str(self.image2_url).strip(),
-            "showcase_image3_url": str(self.image3_url).strip(),
-        }
-        upsert_settings(guild.id, **kwargs)
-
+        old = get_settings(guild.id)
         await interaction.response.defer(ephemeral=True)
-        files, links = await load_showcase_fixed([kwargs["showcase_image2_url"], kwargs["showcase_image3_url"]], start_index=1)
-        content = kwargs["showcase_text"] + ("\n" + "\n".join(links) if links else "")
-        chunks = split_message(content)
 
-        await interaction.followup.send(
-            f"{CHECK} Showcase template saved! When you run `/showcase`, this text goes above your photo, followed by the fixed image(s). Preview:",
-            ephemeral=True,
-        )
+        updates = {"showcase_text": str(self.showcase_text).replace("\\n", "\n")}
+        warnings = []
+        for n, field in ((2, self.image2_url), (3, self.image3_url)):
+            url = str(field).strip()
+            old_url = (old[f"showcase_image{n}_url"] if old else None) or ""
+            old_blob = old[f"showcase_image{n}_blob"] if old else None
+            if not url:
+                updates.update({f"showcase_image{n}_url": "", f"showcase_image{n}_blob": b"", f"showcase_image{n}_name": ""})
+            elif url == old_url and old_blob:
+                continue  # unchanged, keep the saved copy
+            else:
+                got = await fetch_image_data(url)
+                if got:
+                    updates.update({f"showcase_image{n}_url": url, f"showcase_image{n}_blob": got[0], f"showcase_image{n}_name": got[1]})
+                else:
+                    warnings.append(f"Couldn't download image {n} - the link may be expired, private, or over 8 MB. Paste a fresh link. (Kept the old one.)")
+        upsert_settings(guild.id, **updates)
+
+        files, _missing = await load_showcase_fixed(get_settings(guild.id))
+        chunks = split_message(updates["showcase_text"])
+
+        header = f"{CHECK} Showcase template saved! When you run `/showcase`, this text goes above your photo, followed by the fixed image(s). Preview:"
+        if warnings:
+            header += "\n" + "\n".join(warnings)
+        await interaction.followup.send(header, ephemeral=True)
         for chunk in chunks[:-1]:
             await interaction.followup.send(chunk, ephemeral=True)
         if files:
@@ -4388,18 +4406,18 @@ async def showcase_command(interaction: discord.Interaction, image: discord.Atta
 
     await interaction.response.defer(ephemeral=True)
     files = [await image.to_file()]
-    fixed_files, extra_links = await load_showcase_fixed([settings["showcase_image2_url"], settings["showcase_image3_url"]], start_index=1)
+    fixed_files, missing = await load_showcase_fixed(settings)
     files += fixed_files
 
-    content = settings["showcase_text"]
-    if extra_links:
-        content += "\n" + "\n".join(extra_links)
-
-    chunks = split_message(content)
+    chunks = split_message(settings["showcase_text"])
     for chunk in chunks[:-1]:
         await channel.send(chunk)
     await channel.send(chunks[-1], files=files)
-    await interaction.followup.send(f"{CHECK} Showcase posted to {channel.mention}!", ephemeral=True)
+
+    note = ""
+    if missing:
+        note = f"\nCouldn't load fixed image {' and '.join(str(n) for n in missing)} - re-save it with `/showcase_setup` using a fresh link."
+    await interaction.followup.send(f"{CHECK} Showcase posted to {channel.mention}!{note}", ephemeral=True)
 
 
 # ------------------------------------------------------------
