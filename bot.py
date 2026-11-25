@@ -1702,9 +1702,9 @@ class PaymentView(discord.ui.View):
     # persistent (timeout=None + fixed custom_ids), so the buttons keep working after a bot restart
     def __init__(self):
         super().__init__(timeout=None)
+        self.add_item(PaymentButton("<:001DNSggcwutierbx:1574519900100366427>", "r♡bux", "pay_rbx", PAYMENT_RBX_TEXT))
         self.add_item(PaymentButton("<:emoji_114:1575040759248195584>", "cαsh αpp", "pay_ca", PAYMENT_CA_TEXT))
         self.add_item(PaymentButton("<:001DNSggcwutiepp:1574519932505423953>", "pαypαℓ", "pay_pp", PAYMENT_PP_TEXT))
-        self.add_item(PaymentButton("<:001DNSggcwutierbx:1574519900100366427>", "r♡bux", "pay_rbx", PAYMENT_RBX_TEXT))
 
 
 # ------------------------------------------------------------
