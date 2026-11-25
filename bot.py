@@ -3454,9 +3454,10 @@ FASTPASS_WARNING_EMOJI = "<:000:1495625788547137769>"
 FASTPASS_DONE_EMOJI = "<:001_DNS_ggpawi:1521723847261294723>"
 
 FASTPASS_CHECK_INTERVAL_SECONDS = 60
+FASTPASS_WARN_HOURS = 5
 
 
-@bot.tree.command(name="fastpass_roles_setup", description="Set the role(s) that fast pass timers ping at the 2-hour and done reminders")
+@bot.tree.command(name="fastpass_roles_setup", description="Set the role(s) that fast pass timers ping at the 5-hour and done reminders")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.describe(roles="Role(s) to ping, space-separated (e.g. @Waitlisted @VIP)")
 async def fastpass_roles_setup(interaction: discord.Interaction, roles: str):
@@ -3469,7 +3470,7 @@ async def fastpass_roles_setup(interaction: discord.Interaction, roles: str):
     role_ids = [str(r.id) for r in found]
     upsert_settings(guild.id, fastpass_role_ids=",".join(role_ids))
     display = " ".join(r.mention for r in found)
-    msg = f"{CHECK} Fast pass timers will now ping {display} at the 2-hour and done reminders."
+    msg = f"{CHECK} Fast pass timers will now ping {display} at the 5-hour and done reminders."
     if invalid:
         msg += f"\nSkipped (not found): {', '.join(invalid)}"
     await interaction.response.send_message(msg, ephemeral=True)
@@ -3510,16 +3511,16 @@ async def start_fastpass_timer(interaction: discord.Interaction, hours: int):
     conn.commit()
     conn.close()
 
-    message = f"{CHECK} {hours} hrs FP timer started - will remind 2 hours before, and once again when the {hours} hours are up {FASTPASS_PAW_EMOJI}"
+    message = f"{CHECK} {hours} hrs FP timer started - will remind {FASTPASS_WARN_HOURS} hours before, and once again when the {hours} hours are up {FASTPASS_PAW_EMOJI}"
     await interaction.response.send_message(message)
 
 
-@bot.tree.command(name="72", description="Start a 72-hour fast pass timer (pings at 2 hours left, and when it's done)")
+@bot.tree.command(name="72", description="Start a 72-hour fast pass timer (pings at 5 hours left, and when it's done)")
 async def fastpass_72(interaction: discord.Interaction):
     await start_fastpass_timer(interaction, 72)
 
 
-@bot.tree.command(name="24", description="Start a 24-hour fast pass timer (pings at 2 hours left, and when it's done)")
+@bot.tree.command(name="24", description="Start a 24-hour fast pass timer (pings at 5 hours left, and when it's done)")
 async def fastpass_24(interaction: discord.Interaction):
     await start_fastpass_timer(interaction, 24)
 
@@ -3543,13 +3544,13 @@ async def check_fastpass_timers():
         if not channel:
             continue
 
-        if not row["warned"] and now >= end_time - timedelta(hours=2):
+        if not row["warned"] and now >= end_time - timedelta(hours=FASTPASS_WARN_HOURS):
             target = _fastpass_ping_target(guild)
-            message = f"FP timer - {CHECK} 2 hours left! {target} {FASTPASS_WARNING_EMOJI}"
+            message = f"FP timer - {CHECK} {FASTPASS_WARN_HOURS} hours left! {target} {FASTPASS_WARNING_EMOJI}"
             try:
                 await channel.send(message)
             except Exception as e:
-                print(f"Failed to send fastpass 2hr warning for timer #{row['id']}: {e}")
+                print(f"Failed to send fastpass warning for timer #{row['id']}: {e}")
             db_run("UPDATE fastpass_timers SET warned = 1 WHERE id = ?", (row["id"],))
 
         if now >= end_time:
