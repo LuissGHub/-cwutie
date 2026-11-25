@@ -71,6 +71,7 @@ SETTINGS_COLUMNS = [
     "price_thumb_blob", "price_thumb_name", "price_image_blob", "price_image_name",
     "logo_banner_url", "logo_banner_blob", "logo_banner_name",
     "logo_banner2_url", "logo_banner2_blob", "logo_banner2_name",
+    "leave_log_channel_id",
     "fastpass_role_ids",
     "switch_unpaid_category_id", "switch_paid_category_id",
     "switch_fp_category_id", "switch_priority_category_id",
@@ -1840,9 +1841,44 @@ async def on_member_join(member: discord.Member):
         await channel.send(embed=embed2)
 
 
+async def log_member_left(member: discord.Member) -> None:
+    settings = get_settings(member.guild.id)
+    if not settings:
+        return
+    channel_id = settings["leave_log_channel_id"]
+    channel = member.guild.get_channel(int(channel_id)) if channel_id else None
+    if channel is None:
+        return
+
+    role_mentions = [r.mention for r in reversed(member.roles) if not r.is_default()]
+    roles_text = " ".join(role_mentions) if role_mentions else "none"
+    if len(roles_text) > 1000:
+        roles_text = roles_text[:1000] + "…"
+
+    # laid out like Dyno's "Member Left" log
+    embed = discord.Embed(
+        description=f"{member.mention}\n{member.name}",
+        color=0xF4511E,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_author(name="Member Left", icon_url=member.display_avatar.url)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="Roles", value=roles_text, inline=False)
+    embed.set_footer(text=f"ID: {member.id}")
+    try:
+        await channel.send(embed=embed)
+    except discord.HTTPException as e:
+        print(f"Member left log: failed to send for {member.id}: {e!r}")
+
+
 @bot.event
 async def on_member_remove(member: discord.Member):
-    if member.bot or member.joined_at is None:
+    if member.bot:
+        return
+
+    await log_member_left(member)
+
+    if member.joined_at is None:
         return
 
     guild = member.guild
@@ -4325,6 +4361,23 @@ async def check_temp_bans():
 @check_temp_bans.before_loop
 async def before_check_temp_bans():
     await bot.wait_until_ready()
+
+
+@bot.tree.command(name="leavelog_setup", description="Log every member who leaves (with the roles they had) in a channel")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.describe(channel="Channel for the Member Left log")
+async def leavelog_setup(interaction: discord.Interaction, channel: discord.TextChannel):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, leave_log_channel_id=str(channel.id))
+    await interaction.response.send_message(f"{CHECK} Member Left logs will go to {channel.mention}.", ephemeral=True)
+
+
+@bot.tree.command(name="leavelog_clear", description="Turn off the Member Left log")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def leavelog_clear(interaction: discord.Interaction):
+    guild = guild_only(interaction)
+    upsert_settings(guild.id, leave_log_channel_id="")
+    await interaction.response.send_message(f"{CHECK} Member Left log is off.", ephemeral=True)
 
 
 # ------------------------------------------------------------
