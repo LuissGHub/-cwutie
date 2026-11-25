@@ -1620,8 +1620,8 @@ PAYMENT_DIVIDER = "✿﹒ . ๑ ︵ <:001_DNS_ggcradle:1521723847261294723> ︵ 
 
 PAYMENT_PROMPT_TEXT = (
     f"{PAYMENT_DIVIDER}\n\n"
-    "*<:001_DNS_ggcwutie:1521723633175888002>please select your payment method below ꒰ঌ໒꒱*\n"
-    "-# *<:003_divcwutieDNS:1501274190026637362> must read all embeds attached for further information ʚɞ*"
+    "*<:001_DNS_ggcwutie:1521723633175888002>select your payment method below ꒰ঌ໒꒱*\n"
+    "-# *<:003_divcwutieDNS:1501274190026637362> read all embeds attached for info ʚɞ*"
 )
 
 PAYMENT_RBX_TEXT = (
@@ -1657,28 +1657,54 @@ PAYMENT_PP_TEXT = (
 )
 
 
+def apply_price_images(embed: discord.Embed, guild_id: int | None) -> list[discord.File]:
+    # adds the saved /price_setup images (small top-right + bottom) to an embed and returns the files to send with it
+    files: list[discord.File] = []
+    pset = get_settings(guild_id) if guild_id else None
+    if not pset:
+        return files
+    thumb = stored_image_file(pset["price_thumb_blob"] or None, "thumb_" + (pset["price_thumb_name"] or "image.png"))
+    bottom = stored_image_file(pset["price_image_blob"] or None, "bottom_" + (pset["price_image_name"] or "image.png"))
+    if thumb:
+        embed.set_thumbnail(url=f"attachment://{thumb.filename}")
+        files.append(thumb)
+    if bottom:
+        embed.set_image(url=f"attachment://{bottom.filename}")
+        files.append(bottom)
+    return files
+
+
 class PaymentButton(discord.ui.Button):
     def __init__(self, emoji: str, label: str, custom_id: str, text: str):
         super().__init__(emoji=emoji, label=label, style=discord.ButtonStyle.secondary, custom_id=custom_id)
         self.text = text
 
     async def callback(self, interaction: discord.Interaction):
-        embed = build_embed(description=self.text, theme="pink")
         # ack silently, then post as a normal channel message so there's no "Tap to see command" reply header
         await interaction.response.defer()
-        try:
-            await interaction.channel.send(embed=embed)
-        except discord.HTTPException:
-            await interaction.followup.send(embed=embed)
+        for target in ("channel", "followup"):
+            embed = build_embed(description=self.text, theme="pink")
+            files = apply_price_images(embed, interaction.guild_id)  # fresh files each try
+            kwargs = {"embed": embed}
+            if files:
+                kwargs["files"] = files
+            try:
+                if target == "channel":
+                    await interaction.channel.send(**kwargs)
+                else:
+                    await interaction.followup.send(**kwargs)
+                return
+            except discord.HTTPException:
+                continue
 
 
 class PaymentView(discord.ui.View):
     # persistent (timeout=None + fixed custom_ids), so the buttons keep working after a bot restart
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(PaymentButton("<:001DNSggcwutierbx:1574519900100366427>", "robux", "pay_rbx", PAYMENT_RBX_TEXT))
-        self.add_item(PaymentButton("<:001DNSggcwutieca:1574519553201807391>", "cash app", "pay_ca", PAYMENT_CA_TEXT))
-        self.add_item(PaymentButton("<:001DNSggcwutiepp:1574519932505423953>", "paypal", "pay_pp", PAYMENT_PP_TEXT))
+        self.add_item(PaymentButton("<:emoji_114:1575040759248195584>", "cαsh αpp", "pay_ca", PAYMENT_CA_TEXT))
+        self.add_item(PaymentButton("<:001DNSggcwutiepp:1574519932505423953>", "pαypαℓ", "pay_pp", PAYMENT_PP_TEXT))
+        self.add_item(PaymentButton("<:001DNSggcwutierbx:1574519900100366427>", "r♡bux", "pay_rbx", PAYMENT_RBX_TEXT))
 
 
 # ------------------------------------------------------------
@@ -4569,12 +4595,12 @@ async def logoshowcase_command(interaction: discord.Interaction, image: discord.
 # ------------------------------------------------------------
 
 ROBUX_EMOJI = "<:001DNSggcwutierbx:1574519900100366427>"
-PRICE_PAY_ICONS = "<:001DNSggcwutieca:1574519553201807391><:001DNSggcwutiepp:1574519932505423953>"
-PRICE_HEADER = "***ʚ . ୨ price ˚ɞ ** <:001_DNS_ggcradle:1521723847261294723>*"
+PRICE_BOW = "<:001DNSggcwutiebow:1575044731073724480>"
+PRICE_HEADER = "***ʚ . ୨ price ˚ɞ ** <a:sparkly:1563578849994874992>*"
 
 
 def price_line(label: str, robux: int, usd) -> str:
-    return f"***{label}***\n{robux:,} {ROBUX_EMOJI} ${usd} {PRICE_PAY_ICONS}"
+    return f"***{label}***\n{robux:,}r {PRICE_BOW} ${usd}"
 
 # key: (label, usd, robux)
 PRICE_ITEMS = {
